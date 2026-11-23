@@ -8,6 +8,8 @@ import android.content.Intent
 import android.content.pm.PackageInstaller
 import android.content.pm.PackageManager
 import android.location.Geocoder
+import android.location.Location
+import android.location.LocationManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -56,6 +58,11 @@ import java.text.NumberFormat
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.time.Instant
+import java.time.LocalDate
+import java.time.YearMonth
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.io.File
 import org.json.JSONArray
 import org.json.JSONObject
@@ -77,6 +84,7 @@ const val KEY_STARTED_AT = "started_at"
 const val KEY_STOPPED_AT = "stopped_at"
 const val KEY_HISTORY = "trip_history"
 const val KEY_HISTORY_MIGRATED = "trip_history_migrated"
+const val KEY_CHARGE_HISTORY = "charge_history"
 const val KEY_PRICE_UPDATED_AT = "price_updated_at"
 const val KEY_ELECTRIC_CONSUMPTION = "electric_consumption"
 const val KEY_ELECTRIC_PRICE = "electric_price"
@@ -138,6 +146,69 @@ private data class TripRecord(
     val energyCost get() = energyAmount * price
     val depreciationCost get() = if (depreciationEnabled) distanceKm * depreciationPerKm else 0f
     val cost get() = energyCost + depreciationCost
+}
+
+private data class ChargeSession(
+    val id: Long,
+    val vehicleId: String,
+    val vehicleName: String,
+    val kwh: Float,
+    val pricePerKwh: Float,
+    val location: String,
+    val timestamp: Long
+) {
+    val cost get() = kwh * pricePerKwh
+}
+
+private data class InsightBucket(val label: String, val km: Float, val cost: Float, val trips: Int)
+
+private data class NearbyStation(
+    val name: String,
+    val kind: String,
+    val address: String,
+    val latitude: Double,
+    val longitude: Double,
+    val distanceKm: Double,
+    val details: String
+)
+
+private fun readChargeSessions(prefs: android.content.SharedPreferences): List<ChargeSession> = try {
+    val array = JSONArray(prefs.getString(KEY_CHARGE_HISTORY, "[]"))
+    (0 until array.length()).map { i ->
+        val o = array.getJSONObject(i)
+        ChargeSession(o.optLong("id"), o.optString("vehicleId"), o.optString("vehicleName"),
+            o.optDouble("kwh").toFloat(), o.optDouble("pricePerKwh").toFloat(), o.optString("location"), o.optLong("timestamp"))
+    }.sortedByDescending { it.timestamp }
+} catch (_: Exception) { emptyList() }
+
+private fun writeChargeSessions(prefs: android.content.SharedPreferences, sessions: List<ChargeSession>) {
+    val array = JSONArray()
+    sessions.forEach { s -> array.put(JSONObject().put("id", s.id).put("vehicleId", s.vehicleId).put("vehicleName", s.vehicleName)
+        .put("kwh", s.kwh).put("pricePerKwh", s.pricePerKwh).put("location", s.location).put("timestamp", s.timestamp)) }
+    prefs.edit().putString(KEY_CHARGE_HISTORY, array.toString()).apply()
+}
+
+private fun buildInsightBuckets(trips: List<TripRecord>, range: String, today: LocalDate = LocalDate.now()): List<InsightBucket> {
+    val zone = ZoneId.systemDefault()
+    return when (range) {
+        "Week" -> (6 downTo 0).map { offset ->
+            val date = today.minusDays(offset.toLong())
+            val dayTrips = trips.filter { Instant.ofEpochMilli(it.stoppedAt).atZone(zone).toLocalDate() == date }
+            InsightBucket(date.format(DateTimeFormatter.ofPattern("EE", Locale("nl", "NL"))), dayTrips.sumOf { it.distanceKm.toDouble() }.toFloat(),
+                dayTrips.sumOf { it.cost.toDouble() }.toFloat(), dayTrips.size)
+        }
+        "Jaar" -> (4 downTo 0).map { offset ->
+            val year = today.year - offset
+            val yearTrips = trips.filter { Instant.ofEpochMilli(it.stoppedAt).atZone(zone).year == year }
+            InsightBucket(year.toString(), yearTrips.sumOf { it.distanceKm.toDouble() }.toFloat(), yearTrips.sumOf { it.cost.toDouble() }.toFloat(), yearTrips.size)
+        }
+        else -> (5 downTo 0).map { offset ->
+            val month = YearMonth.from(today).minusMonths(offset.toLong())
+            val monthTrips = trips.filter { YearMonth.from(Instant.ofEpochMilli(it.stoppedAt).atZone(zone).toLocalDate()) == month }
+            val label = month.format(DateTimeFormatter.ofPattern("MMM", Locale("nl", "NL"))).replaceFirstChar { it.titlecase(Locale("nl", "NL")) }
+            InsightBucket(label, monthTrips.sumOf { it.distanceKm.toDouble() }.toFloat(), monthTrips.sumOf { it.cost.toDouble() }.toFloat(), monthTrips.size)
+        }
+    }
 }
 
 private fun readHistory(prefs: android.content.SharedPreferences): List<TripRecord> = try {
@@ -396,7 +467,7 @@ private fun RitbonApp() {
                 }
             }
             UpdateCard(context, prefs)
-            VehicleProfilesCard(profiles, selectedVehicle.id, enabled = !running && !workdayActive,
+            if (selectedTab != 7) VehicleProfilesCard(profiles, selectedVehicle.id, enabled = !running && !workdayActive,
                 onSelect = ::selectVehicle,
                 onSave = { profile ->
                     profiles = (profiles.filterNot { it.id == profile.id } + profile)
@@ -420,6 +491,9 @@ private fun RitbonApp() {
                 Tab(selected = selectedTab == 2, onClick = { selectedTab = 2 }, text = { Text("Ritten (${history.size})") })
                 Tab(selected = selectedTab == 3, onClick = { selectedTab = 3 }, text = { Text("Planner") })
                 Tab(selected = selectedTab == 4, onClick = { selectedTab = 4 }, text = { Text("Zakelijk") })
+                Tab(selected = selectedTab == 5, onClick = { selectedTab = 5 }, text = { Text("Inzicht") })
+                Tab(selected = selectedTab == 6, onClick = { selectedTab = 6 }, text = { Text("Laadbeurten") })
+                Tab(selected = selectedTab == 7, onClick = { selectedTab = 7 }, text = { Text("Stations") })
             }
             if (selectedTab == 2) {
                 TripHistory(context, prefs, history, selectedHistoryId, selectedVehicle,
@@ -465,6 +539,12 @@ private fun RitbonApp() {
                         history = readHistory(prefs)
                         info = "Werkdag afgerond. ${prefs.getInt(KEY_BUSINESS_TRIP_COUNT, 0)} zakelijke ritten staan in Ritten."
                     })
+            } else if (selectedTab == 5) {
+                InsightsTab(history)
+            } else if (selectedTab == 6) {
+                ChargeSessionsTab(prefs, selectedVehicle)
+            } else if (selectedTab == 7) {
+                StationsTab(context, prefs)
             } else {
             val electricTab = selectedTab == 1
             val activeElectric = prefs.getBoolean(KEY_TRIP_ELECTRIC, false)
@@ -611,6 +691,9 @@ private fun HeroBanner(selectedTab: Int) {
         2 -> "JOUW RITTEN"
         3 -> "ROUTE PLANNER"
         4 -> "ZAKELIJK RIJDEN"
+        5 -> "RITSTATISTIEKEN"
+        6 -> "ELEKTRISCH LADEN"
+        7 -> "TANKEN & LADEN"
         else -> "BRANDSTOF & KILOMETERS"
     }
     val title = when (selectedTab) {
@@ -618,6 +701,9 @@ private fun HeroBanner(selectedTab: Int) {
         2 -> "Al je ritten.\nHelder bewaard."
         3 -> "Plan je route.\nKen de kosten."
         4 -> "Werkdag gestart.\nRitten geregeld."
+        5 -> "Je kilometers.\nJe kosten."
+        6 -> "Elke laadbeurt\noverzichtelijk."
+        7 -> "Vind een plek\nin de buurt."
         else -> "Elke rit.\nHelder geregeld."
     }
     val subtitle = when (selectedTab) {
@@ -625,6 +711,9 @@ private fun HeroBanner(selectedTab: Int) {
         2 -> "Zoek terug, bekijk bonnen en houd totalen bij."
         3 -> "Bereken afstand en kosten voor je vertrekt."
         4 -> "Je ritten worden automatisch bijgehouden."
+        5 -> "Bekijk je ontwikkeling per week, maand of jaar."
+        6 -> "Bewaar kWh, laadprijs en locatie per sessie."
+        7 -> "Bekijk nabije tankstations en laadpunten op de kaart."
         else -> "Afstand, verbruik en kosten overzichtelijk bij elkaar."
     }
     Box(
@@ -1028,6 +1117,321 @@ private fun ReceiptCard(context: Context, prefs: android.content.SharedPreferenc
 
 @Composable private fun ReceiptLine(label: String, value: String) { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text(label, color = Color(0xFFDCE8DF), fontSize = 12.sp); Text(value, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold) } }
 @Composable private fun HistoryDetailLine(label: String, value: String) { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text(label, color = Muted, fontSize = 12.sp); Text(value, color = Ink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold) } }
+
+@Composable
+private fun InsightsTab(trips: List<TripRecord>) {
+    var range by remember { mutableStateOf("Maand") }
+    var metric by remember { mutableStateOf("Kosten") }
+    val buckets = remember(trips, range) { buildInsightBuckets(trips, range) }
+    val totalKm = trips.sumOf { it.distanceKm.toDouble() }.toFloat()
+    val totalCost = trips.sumOf { it.cost.toDouble() }.toFloat()
+    val averageKm = if (trips.isEmpty()) 0f else totalKm / trips.size
+
+    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
+            Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("Totaaloverzicht · alle voertuigen", color = Muted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                    InsightMetric("GEREDEN", "${totalKm.formatNl()} km", Modifier.weight(1f))
+                    InsightMetric("TOTALE KOSTEN", totalCost.euro(), Modifier.weight(1f))
+                    InsightMetric("RITTEN", "${trips.size}", Modifier.weight(0.8f))
+                }
+                Text("Gemiddeld ${averageKm.formatNl()} km per rit", color = Muted, fontSize = 12.sp)
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf("Week", "Maand", "Jaar").forEach { option ->
+                FilterChip(selected = range == option, onClick = { range = option }, label = { Text(option) })
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf("Kosten", "Kilometers").forEach { option ->
+                FilterChip(selected = metric == option, onClick = { metric = option }, label = { Text(option) })
+            }
+        }
+        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 17.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(if (metric == "Kosten") "Kosten per ${range.lowercase(Locale("nl", "NL"))}" else "Kilometers per ${range.lowercase(Locale("nl", "NL"))}", color = Ink, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                val values = buckets.map { if (metric == "Kosten") it.cost else it.km }
+                val maxValue = (values.maxOrNull() ?: 0f).coerceAtLeast(1f)
+                Canvas(Modifier.fillMaxWidth().height(160.dp)) {
+                    val rows = 4
+                    for (i in 0..rows) {
+                        val y = size.height * i / rows
+                        drawLine(Color(0xFFEAF0F6), androidx.compose.ui.geometry.Offset(0f, y), androidx.compose.ui.geometry.Offset(size.width, y), strokeWidth = 1.dp.toPx())
+                    }
+                    val spacing = size.width * 0.025f
+                    val barWidth = ((size.width - spacing * (buckets.size + 1)) / buckets.size).coerceAtLeast(2f)
+                    buckets.forEachIndexed { index, bucket ->
+                        val value = if (metric == "Kosten") bucket.cost else bucket.km
+                        val height = (value / maxValue * (size.height - 9.dp.toPx())).coerceAtLeast(if (value > 0) 5.dp.toPx() else 0f)
+                        val x = spacing + index * (barWidth + spacing)
+                        drawRoundRect(
+                            brush = Brush.verticalGradient(listOf(Color(0xFF58B7E2), Forest)),
+                            topLeft = androidx.compose.ui.geometry.Offset(x, size.height - height),
+                            size = androidx.compose.ui.geometry.Size(barWidth, height),
+                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(8.dp.toPx())
+                        )
+                    }
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                    buckets.forEach { bucket ->
+                        Text(bucket.label, Modifier.weight(1f), color = Muted, fontSize = 9.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center, maxLines = 1)
+                    }
+                }
+                val periodTotal = values.sum()
+                Text(if (metric == "Kosten") "Totaal in deze periode: ${periodTotal.euro()}" else "Totaal in deze periode: ${periodTotal.formatNl()} km", color = Forest, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                Text("De grafiek gebruikt je opgeslagen ritten en houdt rekening met brandstof-, stroom- en afschrijvingskosten.", color = Muted, fontSize = 11.sp)
+            }
+        }
+        if (trips.isEmpty()) Text("Je grafiek wordt gevuld zodra je ritten opslaat.", color = Muted, fontSize = 12.sp)
+    }
+}
+
+@Composable
+private fun InsightMetric(label: String, value: String, modifier: Modifier) {
+    Column(modifier.background(BlueTint, RoundedCornerShape(15.dp)).padding(horizontal = 11.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        Text(label, color = Muted, fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp, maxLines = 1)
+        Text(value, color = Ink, fontSize = 15.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1)
+    }
+}
+
+@Composable
+private fun ChargeSessionsTab(prefs: android.content.SharedPreferences, vehicle: VehicleProfile) {
+    var sessions by remember { mutableStateOf(readChargeSessions(prefs)) }
+    var kwh by remember { mutableStateOf("") }
+    var price by remember(vehicle.id) { mutableStateOf((if (vehicle.electric) vehicle.price else 0.30f).formatPrice()) }
+    var location by remember { mutableStateOf("") }
+    var message by remember { mutableStateOf("") }
+    val totalKwh = sessions.filter { it.vehicleId == vehicle.id }.sumOf { it.kwh.toDouble() }.toFloat()
+    val totalCost = sessions.filter { it.vehicleId == vehicle.id }.sumOf { it.cost.toDouble() }.toFloat()
+
+    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
+            Column(Modifier.fillMaxWidth().padding(17.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("Nieuwe laadbeurt", color = Ink, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                Text("Profiel: ${vehicle.name}${if (vehicle.electric) "" else " · kies bovenaan een elektrisch voertuig"}", color = if (vehicle.electric) Muted else Color(0xFF9A5B16), fontSize = 12.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    NumericField("Geladen energie", kwh, { kwh = it }, "kWh", Modifier.weight(1f), enabled = true)
+                    NumericField("Prijs per kWh", price, { price = it }, "€/kWh", Modifier.weight(1f), enabled = true)
+                }
+                OutlinedTextField(location, { location = it }, modifier = Modifier.fillMaxWidth(), label = { Text("Laadlocatie (optioneel)") }, singleLine = true, shape = RoundedCornerShape(16.dp))
+                val amount = kwh.replace(',', '.').toFloatOrNull() ?: 0f
+                val unitPrice = price.replace(',', '.').toFloatOrNull() ?: 0f
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text("Totaal", color = Muted, fontSize = 13.sp)
+                    Text((amount * unitPrice).euro(), color = Forest, fontSize = 20.sp, fontWeight = FontWeight.ExtraBold)
+                }
+                Button(onClick = {
+                    val energy = kwh.replace(',', '.').toFloatOrNull()
+                    val rate = price.replace(',', '.').toFloatOrNull()
+                    if (!vehicle.electric) message = "Selecteer eerst een elektrisch voertuig bij Voertuigprofiel."
+                    else if (energy == null || energy <= 0f || rate == null || rate < 0f) message = "Vul geldige kWh en een prijs per kWh in."
+                    else {
+                        val session = ChargeSession(System.currentTimeMillis(), vehicle.id, vehicle.name, energy, rate, location.trim(), System.currentTimeMillis())
+                        sessions = listOf(session) + sessions
+                        writeChargeSessions(prefs, sessions)
+                        kwh = ""; location = ""
+                        message = "Laadbeurt opgeslagen."
+                    }
+                }, modifier = Modifier.fillMaxWidth().height(50.dp), shape = RoundedCornerShape(15.dp), enabled = vehicle.electric) { Text("Laadbeurt opslaan", fontWeight = FontWeight.Bold) }
+                if (message.isNotBlank()) Text(message, color = Forest, fontSize = 12.sp)
+            }
+        }
+        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
+            Column(Modifier.fillMaxWidth().padding(17.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                Text("Laadgeschiedenis · ${vehicle.name}", color = Ink, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                Text("${totalKwh.formatNl()} kWh geladen  ·  ${totalCost.euro()} totaal", color = Forest, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                val visible = sessions.filter { it.vehicleId == vehicle.id }
+                if (visible.isEmpty()) Text("Je opgeslagen laadbeurten verschijnen hier.", color = Muted, fontSize = 12.sp)
+                visible.forEach { session ->
+                    HorizontalDivider(color = Color(0xFFEAF0F6))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text("${session.kwh.formatNl()} kWh  ·  ${session.cost.euro()}", color = Ink, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            Text("${Date(session.timestamp).dateTime()}${if (session.location.isNotBlank()) "  ·  ${session.location}" else ""}", color = Muted, fontSize = 10.sp)
+                            Text("${session.pricePerKwh.euro()} per kWh", color = Muted, fontSize = 11.sp)
+                        }
+                        TextButton(onClick = { sessions = sessions.filterNot { it.id == session.id }; writeChargeSessions(prefs, sessions) }) { Text("Verwijder", color = Color(0xFFB14F45), fontSize = 11.sp) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StationsTab(context: Context, prefs: android.content.SharedPreferences) {
+    var filter by remember { mutableStateOf("Alles") }
+    var stations by remember { mutableStateOf(emptyList<NearbyStation>()) }
+    var center by remember { mutableStateOf<Pair<Double, Double>?>(null) }
+    var loading by remember { mutableStateOf(false) }
+    var status by remember { mutableStateOf("") }
+    var permissionRefresh by remember { mutableIntStateOf(0) }
+    var e10Price by remember { mutableFloatStateOf(prefs.getFloat(KEY_PRICE, 2.092f)) }
+    var e10Updated by remember { mutableLongStateOf(prefs.getLong(KEY_PRICE_UPDATED_AT, 0L)) }
+    val scope = rememberCoroutineScope()
+    val hasLocation = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+        ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+    val locationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
+        if (grants[Manifest.permission.ACCESS_FINE_LOCATION] == true || grants[Manifest.permission.ACCESS_COARSE_LOCATION] == true) permissionRefresh++
+        else status = "Locatietoegang is nodig om stations in de buurt te vinden."
+    }
+
+    LaunchedEffect(filter, permissionRefresh) {
+        if (!hasLocation) {
+            status = "Geef locatietoegang om stations in de buurt op de kaart te zetten."
+        } else {
+            loading = true; status = "Stations zoeken in de buurt…"
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    val location = currentLocation(context) ?: error("Geen actuele locatie gevonden. Zet locatie aan en probeer opnieuw.")
+                    val nearby = findNearbyStations(location.latitude, location.longitude, filter)
+                    location.latitude to location.longitude to nearby
+                }
+                center = result.first
+                stations = result.second
+                status = if (stations.isEmpty()) "Geen stations binnen 5 km gevonden. Probeer de zoekstraal opnieuw." else "${stations.size} locaties gevonden binnen 5 km."
+            } catch (e: Exception) { status = e.message ?: "Stations konden niet worden geladen." }
+            finally { loading = false }
+        }
+    }
+    LaunchedEffect(Unit) {
+        try {
+            val result = withContext(Dispatchers.IO) { fetchE10Price().first }
+            e10Price = result
+            e10Updated = System.currentTimeMillis()
+            prefs.edit().putFloat(KEY_PRICE, result).putLong(KEY_PRICE_UPDATED_AT, e10Updated).apply()
+        } catch (_: Exception) { }
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(13.dp)) {
+        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
+            Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("ANWB-gemiddelde E10", color = Muted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text("${e10Price.euro()} per liter", color = Ink, fontSize = 21.sp, fontWeight = FontWeight.ExtraBold)
+                    Text(if (e10Updated > 0L) Date(e10Updated).dateTime() else "Datum onbekend", color = Muted, fontSize = 10.sp)
+                }
+                Text("ANWB publiceert gemiddelden en de goedkoopste stations per provincie. Prijzen per individueel station zijn in de ANWB Onderweg-app te zien; de openbare pagina biedt daarvoor geen zoek-API.", color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
+                TextButton(onClick = { openAnwbStations(context) }) { Text("Bekijk ANWB-stations en prijzen  ↗", color = Forest, fontWeight = FontWeight.Bold) }
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+            listOf("Alles", "Tankstations", "Laadpunten").forEach { option ->
+                FilterChip(selected = filter == option, onClick = { filter = option }, label = { Text(option, fontSize = 11.sp) })
+            }
+        }
+        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
+            Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (center != null && stations.isNotEmpty()) StationMap(stations, center!!, Modifier.fillMaxWidth().height(245.dp))
+                else Box(Modifier.fillMaxWidth().height(180.dp).background(BlueTint, RoundedCornerShape(16.dp)), contentAlignment = Alignment.Center) {
+                    Text(if (loading) "Kaart en stations laden…" else "De kaart met stations verschijnt hier", color = Muted, fontSize = 12.sp)
+                }
+                Text("© OpenStreetMap contributors · kaartlocaties van OpenStreetMap", color = Muted, fontSize = 10.sp)
+                Text(status, color = if (status.startsWith("Geen") || status.startsWith("Locatie")) Color(0xFF9A5B16) else Muted, fontSize = 11.sp)
+                Button(onClick = {
+                    if (hasLocation) permissionRefresh++ else {
+                        val requested = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+                        locationLauncher.launch(requested.toTypedArray())
+                    }
+                }, enabled = !loading, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
+                    Text(if (loading) "Zoeken…" else if (hasLocation) "Ververs stations in de buurt" else "Locatietoegang geven")
+                }
+            }
+        }
+        stations.forEach { station ->
+            Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)) {
+                Row(Modifier.fillMaxWidth().padding(14.dp), horizontalArrangement = Arrangement.spacedBy(11.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.size(38.dp).background(if (station.kind == "Tankstation") Color(0xFFFFF2E7) else BlueTint, RoundedCornerShape(13.dp)), contentAlignment = Alignment.Center) {
+                        Text(if (station.kind == "Tankstation") "T" else "⚡", color = if (station.kind == "Tankstation") Color(0xFFB76A2B) else Forest, fontWeight = FontWeight.Bold)
+                    }
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(station.name, color = Ink, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        Text(station.address.ifBlank { station.kind }, color = Muted, fontSize = 11.sp)
+                        if (station.details.isNotBlank()) Text(station.details, color = Muted, fontSize = 10.sp)
+                    }
+                    Text("${String.format(Locale("nl", "NL"), "%.1f", station.distanceKm)} km", color = Forest, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+        if (!loading && stations.isEmpty() && center != null) Text("Locaties worden via OpenStreetMap gevonden; het ANWB-gemiddelde hierboven komt van de openbare ANWB-prijspagina.", color = Muted, fontSize = 11.sp)
+    }
+}
+
+private fun currentLocation(context: Context): Location? {
+    val manager = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+    return try {
+        manager.getProviders(true).mapNotNull { provider -> manager.getLastKnownLocation(provider) }
+            .maxByOrNull { it.time }
+    } catch (_: SecurityException) { null }
+}
+
+private fun findNearbyStations(latitude: Double, longitude: Double, filter: String): List<NearbyStation> {
+    val clauses = when (filter) {
+        "Tankstations" -> "node(around:5000,$latitude,$longitude)[amenity=fuel];way(around:5000,$latitude,$longitude)[amenity=fuel];"
+        "Laadpunten" -> "node(around:5000,$latitude,$longitude)[amenity=charging_station];way(around:5000,$latitude,$longitude)[amenity=charging_station];"
+        else -> "node(around:5000,$latitude,$longitude)[amenity=fuel];way(around:5000,$latitude,$longitude)[amenity=fuel];node(around:5000,$latitude,$longitude)[amenity=charging_station];way(around:5000,$latitude,$longitude)[amenity=charging_station];"
+    }
+    val query = "[out:json][timeout:25];($clauses);out center tags;"
+    val connection = (URL("https://overpass-api.de/api/interpreter").openConnection() as HttpURLConnection).apply {
+        requestMethod = "POST"; doOutput = true; connectTimeout = 20000; readTimeout = 30000
+        setRequestProperty("User-Agent", "VLOTRIT Android personal vehicle cost app")
+        setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+    }
+    return try {
+        connection.outputStream.use { it.write(("data=" + java.net.URLEncoder.encode(query, "UTF-8")).toByteArray(Charsets.UTF_8)) }
+        if (connection.responseCode !in 200..299) error("OpenStreetMap zoeken is tijdelijk niet beschikbaar (HTTP ${connection.responseCode}).")
+        val elements = JSONObject(connection.inputStream.bufferedReader().use { it.readText() }).optJSONArray("elements") ?: JSONArray()
+        (0 until elements.length()).mapNotNull { i ->
+            val item = elements.optJSONObject(i) ?: return@mapNotNull null
+            val tags = item.optJSONObject("tags") ?: JSONObject()
+            val kind = if (tags.optString("amenity") == "fuel") "Tankstation" else if (tags.optString("amenity") == "charging_station") "Laadpunt" else return@mapNotNull null
+            val center = item.optJSONObject("center")
+            val lat = if (item.has("lat")) item.optDouble("lat") else center?.optDouble("lat") ?: Double.NaN
+            val lon = if (item.has("lon")) item.optDouble("lon") else center?.optDouble("lon") ?: Double.NaN
+            if (lat.isNaN() || lon.isNaN()) return@mapNotNull null
+            val displayName = tags.optString("name").ifBlank { tags.optString("brand").ifBlank { tags.optString("operator").ifBlank { kind } } }
+            val address = listOf(tags.optString("addr:street"), tags.optString("addr:housenumber"), tags.optString("addr:city"))
+                .filter { it.isNotBlank() }.joinToString(" ")
+            val details = if (kind == "Laadpunt") listOf(tags.optString("socket:type2").takeIf { it.isNotBlank() }?.let { "Type 2 $it" },
+                tags.optString("socket:ccs").takeIf { it.isNotBlank() }?.let { "CCS $it" }, tags.optString("capacity").takeIf { it.isNotBlank() })
+                .filterNotNull().joinToString(" · ") else tags.optString("fuel:e10").takeIf { it.isNotBlank() }?.let { "E10: $it" }.orEmpty()
+            val distance = FloatArray(1)
+            Location.distanceBetween(latitude, longitude, lat, lon, distance)
+            NearbyStation(displayName, kind, address, lat, lon, distance[0] / 1000.0, details)
+        }.distinctBy { "${it.latitude},${it.longitude}" }.sortedBy { it.distanceKm }.take(40)
+    } finally { connection.disconnect() }
+}
+
+private fun openAnwbStations(context: Context) {
+    try { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://www.anwb.nl/auto/brandstof/goedkoopste-tankstation"))) }
+    catch (_: Exception) { }
+}
+
+@Composable
+private fun StationMap(stations: List<NearbyStation>, center: Pair<Double, Double>, modifier: Modifier = Modifier) {
+    val mapData = remember(stations, center) {
+        JSONArray().apply { stations.forEach { put(JSONArray().put(it.latitude).put(it.longitude).put(if (it.kind == "Tankstation") "fuel" else "charge")) } }.toString()
+    }
+    AndroidView(modifier = modifier, factory = { ctx ->
+        WebView(ctx).apply { settings.javaScriptEnabled = true; settings.domStorageEnabled = true; settings.userAgentString = "VLOTRIT Android stations map"; webViewClient = WebViewClient() }
+    }, update = { web ->
+        if (web.tag != mapData) {
+            web.tag = mapData
+            val html = """<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#eef3f7}canvas{width:100%;height:100%;display:block}</style></head><body><canvas id="map"></canvas><script>
+                const pts=$mapData,me=[${center.first},${center.second}],c=document.getElementById('map'),ctx=c.getContext('2d'),W=720,H=430,pad=28;c.width=W;c.height=H;
+                function tp(p,z){const n=2**z,lat=Math.max(-85.0511,Math.min(85.0511,p[0]))*Math.PI/180;return{x:(p[1]+180)/360*n*256,y:(1-Math.asinh(Math.tan(lat))/Math.PI)/2*n*256}}
+                const all=pts.map(p=>[p[0],p[1]]).concat([me]);let z=15,w=[];for(;z>=9;z--){w=all.map(p=>tp(p,z));let xs=w.map(p=>p.x),ys=w.map(p=>p.y);if(Math.max(...xs)-Math.min(...xs)<W-2*pad&&Math.max(...ys)-Math.min(...ys)<H-2*pad)break}
+                const xs=w.map(p=>p.x),ys=w.map(p=>p.y);let ax=Math.min(...xs),bx=Math.max(...xs),ay=Math.min(...ys),by=Math.max(...ys);if(bx-ax<256){let m=(ax+bx)/2;ax=m-128;bx=m+128}if(by-ay<180){let m=(ay+by)/2;ay=m-90;by=m+90}
+                const s=Math.min((W-2*pad)/(bx-ax),(H-2*pad)/(by-ay)),ox=(W-(bx-ax)*s)/2-ax*s,oy=(H-(by-ay)*s)/2-ay*s,tiles=[];
+                for(let x=Math.floor(ax/256)-1;x<=Math.floor(bx/256)+1;x++)for(let y=Math.floor(ay/256)-1;y<=Math.floor(by/256)+1;y++){if(x<0||y<0||x>=2**z||y>=2**z)continue;let im=new Image();im.onload=draw;im.onerror=draw;im.src='https://tile.openstreetmap.de/'+z+'/'+x+'/'+y+'.png';tiles.push({im,x,y})}
+                function draw(){ctx.fillStyle='#eef3f7';ctx.fillRect(0,0,W,H);for(let t of tiles)if(t.im.complete&&t.im.naturalWidth)ctx.drawImage(t.im,t.x*256*s+ox,t.y*256*s+oy,256*s,256*s);for(let p of pts){let q=tp([p[0],p[1]],z),x=q.x*s+ox,y=q.y*s+oy;ctx.beginPath();ctx.arc(x,y,8,0,Math.PI*2);ctx.fillStyle=p[2]==='fuel'?'#ef8a3c':'#1883bd';ctx.fill();ctx.lineWidth=2;ctx.strokeStyle='white';ctx.stroke()}let q=tp(me,z);ctx.beginPath();ctx.arc(q.x*s+ox,q.y*s+oy,8,0,Math.PI*2);ctx.fillStyle='#193b61';ctx.fill();ctx.lineWidth=3;ctx.strokeStyle='white';ctx.stroke()}draw();
+            </script></body></html>"""
+            web.loadDataWithBaseURL("https://www.openstreetmap.de/", html, "text/html", "UTF-8", null)
+        }
+    })
+}
 
 private data class PlannedRoute(val km: Double, val origin: String, val destination: String, val geometry: String, val roundTrip: Boolean = false, val stops: List<String> = emptyList())
 
