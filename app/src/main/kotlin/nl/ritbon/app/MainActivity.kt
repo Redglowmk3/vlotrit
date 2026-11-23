@@ -16,6 +16,7 @@ import android.os.Bundle
 import android.provider.Settings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.text.Html
 import androidx.compose.foundation.clickable
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -169,7 +170,16 @@ private data class NearbyStation(
     val latitude: Double,
     val longitude: Double,
     val distanceKm: Double,
-    val details: String
+    val details: String,
+    val priceE10: Float? = null,
+    val priceE5: Float? = null,
+    val priceDiesel: Float? = null,
+    val priceCheckedAt: Long = 0L,
+    val priceSource: String = "",
+    val website: String = "",
+    val phone: String = "",
+    val openingHours: String = "",
+    val city: String = ""
 )
 
 private fun readChargeSessions(prefs: android.content.SharedPreferences): List<ChargeSession> = try {
@@ -1271,6 +1281,9 @@ private fun StationsTab(context: Context, prefs: android.content.SharedPreferenc
     var loading by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf("") }
     var permissionRefresh by remember { mutableIntStateOf(0) }
+    var sortBy by remember { mutableStateOf("Afstand") }
+    var sortMenuOpen by remember { mutableStateOf(false) }
+    var expandedStation by remember { mutableStateOf<String?>(null) }
     var e10Price by remember { mutableFloatStateOf(prefs.getFloat(KEY_PRICE, 2.092f)) }
     var e10Updated by remember { mutableLongStateOf(prefs.getLong(KEY_PRICE_UPDATED_AT, 0L)) }
     val scope = rememberCoroutineScope()
@@ -1283,7 +1296,7 @@ private fun StationsTab(context: Context, prefs: android.content.SharedPreferenc
 
     LaunchedEffect(permissionRefresh) {
         if (!hasLocation) {
-            status = "Geef locatietoegang om stations in de buurt op de kaart te zetten."
+                status = "Geef locatietoegang om stations in jouw buurt te zoeken."
         } else {
             loading = true; status = "Stations zoeken in de buurt…"
             try {
@@ -1291,7 +1304,18 @@ private fun StationsTab(context: Context, prefs: android.content.SharedPreferenc
                     ?: error("Geen actuele locatie gevonden. Zet locatie aan en probeer opnieuw.")
                 center = location.latitude to location.longitude
                 hasGpsCenter = true
-                stations = withContext(Dispatchers.IO) { findNearbyStations(location.latitude, location.longitude) }
+                val nearby = withContext(Dispatchers.IO) { findNearbyStations(location.latitude, location.longitude) }
+                val city = nearby.firstOrNull { it.city.isNotBlank() }?.city
+                    ?: runCatching { withContext(Dispatchers.IO) { reverseGeocodeCity(location.latitude, location.longitude) } }.getOrNull().orEmpty()
+                val broaderPrices = if (city.isNotBlank()) runCatching {
+                    withContext(Dispatchers.IO) { fetchCommunityStationPrices(city, nearby) }
+                }.getOrDefault(emptyMap()) else emptyMap()
+                stations = nearby.map { station ->
+                    val wider = broaderPrices[stationAddressKey(station.address)]
+                    station.copy(priceE10 = wider?.e10, priceE5 = wider?.e5,
+                        priceDiesel = wider?.diesel, priceCheckedAt = wider?.checkedAt ?: 0L,
+                        priceSource = if (wider != null) "ANWB / DirectLease via HoeveelBenzine" else "")
+                }
                 status = if (stations.isEmpty()) "Geen stations binnen 5 km gevonden. Probeer de zoekstraal opnieuw." else "${stations.size} locaties gevonden binnen 5 km."
             } catch (e: Exception) { status = e.message ?: "Stations konden niet worden geladen." }
             finally { loading = false }
@@ -1313,6 +1337,14 @@ private fun StationsTab(context: Context, prefs: android.content.SharedPreferenc
             else -> stations
         }
     }
+    val sortedStations = remember(visibleStations, sortBy) {
+        when (sortBy) {
+            "Prijs laag-hoog" -> visibleStations.sortedWith(compareBy<NearbyStation> { it.priceE10 == null }.thenBy { it.priceE10 ?: Float.MAX_VALUE }.thenBy { it.distanceKm })
+            "Prijs hoog-laag" -> visibleStations.sortedWith(compareBy<NearbyStation> { it.priceE10 == null }.thenByDescending { it.priceE10 ?: 0f }.thenBy { it.distanceKm })
+            "Naam" -> visibleStations.sortedBy { it.name.lowercase(Locale.ROOT) }
+            else -> visibleStations.sortedBy { it.distanceKm }
+        }
+    }
 
     Column(verticalArrangement = Arrangement.spacedBy(13.dp)) {
         Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
@@ -1322,8 +1354,8 @@ private fun StationsTab(context: Context, prefs: android.content.SharedPreferenc
                     Text("${e10Price.euro()} per liter", color = Ink, fontSize = 21.sp, fontWeight = FontWeight.ExtraBold)
                     Text(if (e10Updated > 0L) Date(e10Updated).dateTime() else "Datum onbekend", color = Muted, fontSize = 10.sp)
                 }
-                Text("ANWB publiceert gemiddelden en de goedkoopste stations per provincie. Prijzen per individueel station zijn in de ANWB Onderweg-app te zien; de openbare pagina biedt daarvoor geen zoek-API.", color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
-                TextButton(onClick = { openAnwbStations(context) }) { Text("Bekijk ANWB-stations en prijzen  ↗", color = Forest, fontWeight = FontWeight.Bold) }
+                Text("Pompprijzen zijn indicatief en komen uit ANWB/DirectLease; de prijsfeed wordt ongeveer drie keer per dag bijgewerkt. Niet ieder station heeft een prijs.", color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
+                TextButton(onClick = { openExternal(context, "https://hoeveelbenzine.nl/goedkoop-tanken") }) { Text("Bekijk prijsbron ↗", color = Forest, fontWeight = FontWeight.Bold) }
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
@@ -1331,40 +1363,73 @@ private fun StationsTab(context: Context, prefs: android.content.SharedPreferenc
                 FilterChip(selected = filter == option, onClick = { filter = option }, label = { Text(option, fontSize = 11.sp) })
             }
         }
-        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
-            Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (center != null) StationMap(visibleStations, center!!, hasGpsCenter, Modifier.fillMaxWidth().height(245.dp))
-                else Box(Modifier.fillMaxWidth().height(180.dp).background(BlueTint, RoundedCornerShape(16.dp)), contentAlignment = Alignment.Center) {
-                    Text(if (loading) "Kaart en stations laden…" else "De kaart met stations verschijnt hier", color = Muted, fontSize = 12.sp)
-                }
-                Text("© OpenStreetMap contributors · kaartlocaties van OpenStreetMap", color = Muted, fontSize = 10.sp)
-                Text(status, color = if (status.startsWith("Geen") || status.startsWith("Locatie")) Color(0xFF9A5B16) else Muted, fontSize = 11.sp)
-                Button(onClick = {
-                    if (hasLocation) permissionRefresh++ else {
-                        val requested = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
-                        locationLauncher.launch(requested.toTypedArray())
+        Text(status, color = if (status.startsWith("Geen") || status.startsWith("Locatie")) Color(0xFF9A5B16) else Muted, fontSize = 11.sp)
+        Button(onClick = {
+            if (hasLocation) permissionRefresh++ else {
+                val requested = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+                locationLauncher.launch(requested.toTypedArray())
+            }
+        }, enabled = !loading, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
+            Text(if (loading) "Ophalen..." else if (hasLocation) "Ververs stations en prijzen" else "Locatietoegang geven")
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Text("${sortedStations.size} locaties", color = Muted, fontSize = 12.sp)
+            Box {
+                OutlinedButton(onClick = { sortMenuOpen = true }) { Text("Sorteer: ${sortBy}") }
+                DropdownMenu(expanded = sortMenuOpen, onDismissRequest = { sortMenuOpen = false }) {
+                    listOf("Afstand", "Prijs laag-hoog", "Prijs hoog-laag", "Naam").forEach { choice ->
+                        DropdownMenuItem(text = { Text(choice) }, onClick = { sortBy = choice; sortMenuOpen = false })
                     }
-                }, enabled = !loading, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
-                    Text(if (loading) "Zoeken…" else if (hasLocation) "Ververs stations in de buurt" else "Locatietoegang geven")
                 }
             }
         }
-        visibleStations.forEach { station ->
-            Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)) {
-                Row(Modifier.fillMaxWidth().padding(14.dp), horizontalArrangement = Arrangement.spacedBy(11.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.size(38.dp).background(if (station.kind == "Tankstation") Color(0xFFFFF2E7) else BlueTint, RoundedCornerShape(13.dp)), contentAlignment = Alignment.Center) {
-                        Text(if (station.kind == "Tankstation") "T" else "⚡", color = if (station.kind == "Tankstation") Color(0xFFB76A2B) else Forest, fontWeight = FontWeight.Bold)
+        sortedStations.forEach { station ->
+            val key = "${station.latitude},${station.longitude}"
+            val expanded = expandedStation == key
+            Card(Modifier.fillMaxWidth().clickable { expandedStation = if (expanded) null else key },
+                shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = Color.White),
+                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)) {
+                Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(11.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.size(38.dp).background(if (station.kind == "Tankstation") Color(0xFFFFF2E7) else BlueTint, RoundedCornerShape(13.dp)), contentAlignment = Alignment.Center) {
+                            Text(if (station.kind == "Tankstation") "T" else "⚡", color = if (station.kind == "Tankstation") Color(0xFFB76A2B) else Forest, fontWeight = FontWeight.Bold)
+                        }
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(station.name, color = Ink, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            Text(station.address.ifBlank { station.kind }, color = Muted, fontSize = 11.sp)
+                        }
+                        Column(horizontalAlignment = Alignment.End) {
+                            Text(if (station.priceE10 != null && station.kind == "Tankstation") station.priceE10.euro() else "—",
+                                color = if (station.priceE10 != null) Forest else Muted, fontSize = 15.sp, fontWeight = FontWeight.ExtraBold)
+                            if (station.kind == "Tankstation") Text("E10 / liter", color = Muted, fontSize = 9.sp)
+                            Text("${String.format(Locale("nl", "NL"), "%.1f", station.distanceKm)} km", color = Color(0xFF2563A6), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                        }
                     }
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Text(station.name, color = Ink, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                        Text(station.address.ifBlank { station.kind }, color = Muted, fontSize = 11.sp)
-                        if (station.details.isNotBlank()) Text(station.details, color = Muted, fontSize = 10.sp)
+                    if (expanded) {
+                        HorizontalDivider(color = Color(0xFFE5EBE5))
+                        val fuelPrices = listOfNotNull(
+                            station.priceE10?.let { "E10 ${it.euro()}/L" },
+                            station.priceE5?.let { "E5/98 ${it.euro()}/L" },
+                            station.priceDiesel?.let { "Diesel ${it.euro()}/L" }
+                        ).joinToString(" · ")
+                        Text(if (station.kind == "Tankstation") fuelPrices.ifBlank { "Geen prijs voor dit station in de prijsfeed." }
+                            else station.details.ifBlank { "Laadpuntgegevens niet beschikbaar." }, color = Ink, fontSize = 12.sp)
+                        if (fuelPrices.isNotBlank()) Text("Indicatieve prijzen · ANWB/DirectLease · gegevens opgehaald ${Date(station.priceCheckedAt).dateTime()}", color = Muted, fontSize = 10.sp)
+                        Text("${station.name} · ${station.address.ifBlank { "Adres onbekend" }}", color = Muted, fontSize = 11.sp)
+                        if (station.details.isNotBlank()) Text(station.details, color = Muted, fontSize = 11.sp)
+                        if (station.openingHours.isNotBlank()) Text("Openingstijden: ${station.openingHours}", color = Muted, fontSize = 11.sp)
+                        if (station.phone.isNotBlank()) Text("Telefoon: ${station.phone}", color = Muted, fontSize = 11.sp)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            TextButton(onClick = { openStationNavigation(context, station) }) { Text("Navigeer", color = Forest) }
+                            if (station.website.isNotBlank()) TextButton(onClick = { openExternal(context, station.website) }) { Text("Website", color = Forest) }
+                            TextButton(onClick = { openAnwbStations(context) }) { Text("ANWB-prijs", color = Forest) }
+                        }
                     }
-                    Text("${String.format(Locale("nl", "NL"), "%.1f", station.distanceKm)} km", color = Forest, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                 }
             }
         }
-        if (!loading && stations.isEmpty() && center != null) Text("Locaties worden via OpenStreetMap gevonden; het ANWB-gemiddelde hierboven komt van de openbare ANWB-prijspagina.", color = Muted, fontSize = 11.sp)
+        if (!loading && stations.isEmpty()) Text("Geen locaties gevonden. Controleer locatietoegang en probeer opnieuw.", color = Muted, fontSize = 11.sp)
+
     }
 }
 
@@ -1389,7 +1454,7 @@ private fun findNearbyStations(latitude: Double, longitude: Double): List<Nearby
     for (endpoint in endpoints) {
         val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"; doOutput = true; connectTimeout = 10000; readTimeout = 18000
-            setRequestProperty("User-Agent", "VLOTRIT/1.18 (Android; https://github.com/Redglowmk3/vlotrit)")
+            setRequestProperty("User-Agent", "VLOTRIT/1.19 (Android; https://github.com/Redglowmk3/vlotrit)")
             setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
         }
         try {
@@ -1413,7 +1478,8 @@ private fun findNearbyStations(latitude: Double, longitude: Double): List<Nearby
                     .filterNotNull().joinToString(" · ") else tags.optString("fuel:e10").takeIf { it.isNotBlank() }?.let { "E10: $it" }.orEmpty()
                 val distance = FloatArray(1)
                 Location.distanceBetween(latitude, longitude, lat, lon, distance)
-                NearbyStation(displayName, kind, address, lat, lon, distance[0] / 1000.0, details)
+                NearbyStation(displayName, kind, address, lat, lon, distance[0] / 1000.0, details,
+                    website = tags.optString("website"), phone = tags.optString("phone"), openingHours = tags.optString("opening_hours"), city = tags.optString("addr:city"))
             }.distinctBy { "${it.latitude},${it.longitude}" }.sortedBy { it.distanceKm }.take(40)
         } catch (e: Exception) {
             lastError = e.message ?: "onbekende fout"
@@ -1425,6 +1491,101 @@ private fun findNearbyStations(latitude: Double, longitude: Double): List<Nearby
 private fun openAnwbStations(context: Context) {
     try { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://www.anwb.nl/auto/brandstof/goedkoopste-tankstation"))) }
     catch (_: Exception) { }
+}
+
+private data class AnwbStationPrice(val address: String, val price: Float)
+private data class CommunityFuelPrice(val e10: Float? = null, val e5: Float? = null, val diesel: Float? = null, val checkedAt: Long = 0L)
+
+private fun normalizeStationAddress(value: String): String = value.lowercase(Locale.ROOT)
+    .replace(Regex("[^a-z0-9]+"), " ").trim().replace(Regex("\\s+"), " ")
+
+private fun stationAddressKey(value: String): String {
+    val clean = normalizeStationAddress(value)
+    val parts = clean.split(' ').filter { it.isNotBlank() }
+    if (parts.size < 2) return clean
+    val houseIndex = parts.indexOfFirst { it.any(Char::isDigit) }
+    return if (houseIndex > 0) parts.take(houseIndex + 1).joinToString(" ") else parts.take(2).joinToString(" ")
+}
+
+private fun reverseGeocodeCity(latitude: Double, longitude: Double): String {
+    val url = URL("https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=10&addressdetails=1&lat=$latitude&lon=$longitude")
+    val connection = (url.openConnection() as HttpURLConnection).apply {
+        connectTimeout = 9000; readTimeout = 10000
+        setRequestProperty("User-Agent", "VLOTRIT Android personal vehicle-cost app")
+    }
+    return try {
+        val address = JSONObject(connection.inputStream.bufferedReader().use { it.readText() }).optJSONObject("address") ?: return ""
+        listOf("city", "town", "village", "municipality", "hamlet").firstNotNullOfOrNull { key -> address.optString(key).takeIf { it.isNotBlank() } }.orEmpty()
+    } finally { connection.disconnect() }
+}
+
+private fun fetchCommunityStationPrices(city: String, stations: List<NearbyStation>): Map<String, CommunityFuelPrice> {
+    val slug = normalizeStationAddress(city).replace(' ', '-')
+    val url = URL("https://hoeveelbenzine.nl/goedkoop-tanken/$slug")
+    val connection = (url.openConnection() as HttpURLConnection).apply {
+        connectTimeout = 12000; readTimeout = 15000
+        setRequestProperty("User-Agent", "VLOTRIT Android personal vehicle-cost app")
+    }
+    return try {
+        val html = connection.inputStream.bufferedReader().use { it.readText() }
+        val plain = Html.fromHtml(html, Html.FROM_HTML_MODE_COMPACT).toString().replace('\u00a0', ' ')
+        val result = mutableMapOf<String, CommunityFuelPrice>()
+        val pattern = Regex("(?i)(Euro\\s*95\\s*(?:\\(E10\\))?|Super\\s*Plus\\s*98|Euro\\s*98|Diesel(?:\\s*\\(B7\\))?)[^€\\n]{0,70}€\\s*([0-9]+[,.][0-9]{2,3})")
+        pattern.findAll(plain).forEach { match ->
+            val price = match.groupValues[2].replace(',', '.').toFloatOrNull() ?: return@forEach
+            val before = plain.substring((match.range.first - 650).coerceAtLeast(0), match.range.first)
+            val normalizedBefore = normalizeStationAddress(before)
+            val owner = stations.mapNotNull { station ->
+                val key = stationAddressKey(station.address)
+                val position = if (key.length >= 5) normalizedBefore.lastIndexOf(key) else -1
+                if (position < 0) null else Triple(station, key, position)
+            }.maxByOrNull { it.third }?.first ?: return@forEach
+            val key = stationAddressKey(owner.address)
+            val prior = result[key] ?: CommunityFuelPrice()
+            val product = match.groupValues[1].lowercase(Locale.ROOT)
+            result[key] = when {
+                product.contains("diesel") -> prior.copy(diesel = price, checkedAt = System.currentTimeMillis())
+                product.contains("98") -> prior.copy(e5 = price, checkedAt = System.currentTimeMillis())
+                else -> prior.copy(e10 = price, checkedAt = System.currentTimeMillis())
+            }
+        }
+        result
+    } finally { connection.disconnect() }
+}
+
+private fun fetchAnwbStationPrices(): List<AnwbStationPrice> {
+    val connection = (URL("https://www.anwb.nl/auto/brandstof/goedkoopste-tankstation").openConnection() as HttpURLConnection).apply {
+        connectTimeout = 12000; readTimeout = 15000
+        setRequestProperty("User-Agent", "VLOTRIT Android app (https://github.com/Redglowmk3/vlotrit)")
+    }
+    return try {
+        val html = connection.inputStream.bufferedReader().use { it.readText() }
+        val plain = Html.fromHtml(html, Html.FROM_HTML_MODE_COMPACT).toString()
+            .replace('\u00a0', ' ').replace(Regex("[ \\t]+"), " ")
+        val blocks = Regex("(?is)(?:Zuid-Holland|Noord-Holland|Noord-Brabant|Gelderland|Utrecht|Overijssel|Limburg|Friesland|Groningen|Drenthe|Flevoland|Zeeland) top 3(.*?)(?=(?:Zuid-Holland|Noord-Holland|Noord-Brabant|Gelderland|Utrecht|Overijssel|Limburg|Friesland|Groningen|Drenthe|Flevoland|Zeeland) top 3|Brandstofprijzen)")
+        blocks.findAll(plain).flatMap { block ->
+            val rowRegex = Regex("(?is)(?:^|\\n)\\s*[1-3]\\s+(.{3,180}?)\\s+Bekijk op de kaart.*?Brandstofprijs\\s*\\(€\\s*/\\s*liter\\)\\s*([0-9]+,[0-9]{2,3})")
+            rowRegex.findAll(block.groupValues[1]).mapNotNull { row ->
+                val address = row.groupValues[1].trim().replace(Regex("\\s+"), " ")
+                val price = row.groupValues[2].replace(',', '.').toFloatOrNull()
+                if (address.isBlank() || price == null) null else AnwbStationPrice(address, price)
+            }
+        }.toList()
+    } finally { connection.disconnect() }
+}
+
+private fun openStationNavigation(context: Context, station: NearbyStation) {
+    val label = Uri.encode(station.name + " " + station.address)
+    try { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("google.navigation:q=$label&mode=d"))) }
+    catch (_: Exception) {
+        try { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("geo:${station.latitude},${station.longitude}?q=$label"))) }
+        catch (_: Exception) { }
+    }
+}
+
+private fun openExternal(context: Context, value: String) {
+    val url = if (value.startsWith("http://") || value.startsWith("https://")) value else "https://$value"
+    try { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) } catch (_: Exception) { }
 }
 
 @Composable
@@ -1463,7 +1624,7 @@ private fun MapWebView(script: String, modifier: Modifier) {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
-            settings.userAgentString = "VLOTRIT/1.18 (Android; https://github.com/Redglowmk3/vlotrit)"
+            settings.userAgentString = "VLOTRIT/1.19 (Android; https://github.com/Redglowmk3/vlotrit)"
             webViewClient = WebViewClient()
             setBackgroundColor(android.graphics.Color.rgb(238, 243, 247))
         }
