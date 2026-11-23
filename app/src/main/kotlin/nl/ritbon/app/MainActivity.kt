@@ -1264,7 +1264,10 @@ private fun ChargeSessionsTab(prefs: android.content.SharedPreferences, vehicle:
 private fun StationsTab(context: Context, prefs: android.content.SharedPreferences) {
     var filter by remember { mutableStateOf("Alles") }
     var stations by remember { mutableStateOf(emptyList<NearbyStation>()) }
-    var center by remember { mutableStateOf<Pair<Double, Double>?>(null) }
+    // Always show a useful map, even before permission/location lookup succeeds.
+    val netherlandsCenter = 52.1326 to 5.2913
+    var center by remember { mutableStateOf<Pair<Double, Double>?>(netherlandsCenter) }
+    var hasGpsCenter by remember { mutableStateOf(false) }
     var loading by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf("") }
     var permissionRefresh by remember { mutableIntStateOf(0) }
@@ -1278,19 +1281,17 @@ private fun StationsTab(context: Context, prefs: android.content.SharedPreferenc
         else status = "Locatietoegang is nodig om stations in de buurt te vinden."
     }
 
-    LaunchedEffect(filter, permissionRefresh) {
+    LaunchedEffect(permissionRefresh) {
         if (!hasLocation) {
             status = "Geef locatietoegang om stations in de buurt op de kaart te zetten."
         } else {
             loading = true; status = "Stations zoeken in de buurt…"
             try {
-                val result = withContext(Dispatchers.IO) {
-                    val location = currentLocation(context) ?: error("Geen actuele locatie gevonden. Zet locatie aan en probeer opnieuw.")
-                    val nearby = findNearbyStations(location.latitude, location.longitude, filter)
-                    location.latitude to location.longitude to nearby
-                }
-                center = result.first
-                stations = result.second
+                val location = withContext(Dispatchers.IO) { currentLocation(context) }
+                    ?: error("Geen actuele locatie gevonden. Zet locatie aan en probeer opnieuw.")
+                center = location.latitude to location.longitude
+                hasGpsCenter = true
+                stations = withContext(Dispatchers.IO) { findNearbyStations(location.latitude, location.longitude) }
                 status = if (stations.isEmpty()) "Geen stations binnen 5 km gevonden. Probeer de zoekstraal opnieuw." else "${stations.size} locaties gevonden binnen 5 km."
             } catch (e: Exception) { status = e.message ?: "Stations konden niet worden geladen." }
             finally { loading = false }
@@ -1303,6 +1304,14 @@ private fun StationsTab(context: Context, prefs: android.content.SharedPreferenc
             e10Updated = System.currentTimeMillis()
             prefs.edit().putFloat(KEY_PRICE, result).putLong(KEY_PRICE_UPDATED_AT, e10Updated).apply()
         } catch (_: Exception) { }
+    }
+
+    val visibleStations = remember(stations, filter) {
+        when (filter) {
+            "Tankstations" -> stations.filter { it.kind == "Tankstation" }
+            "Laadpunten" -> stations.filter { it.kind == "Laadpunt" }
+            else -> stations
+        }
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(13.dp)) {
@@ -1324,7 +1333,7 @@ private fun StationsTab(context: Context, prefs: android.content.SharedPreferenc
         }
         Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
             Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (center != null && stations.isNotEmpty()) StationMap(stations, center!!, Modifier.fillMaxWidth().height(245.dp))
+                if (center != null) StationMap(visibleStations, center!!, hasGpsCenter, Modifier.fillMaxWidth().height(245.dp))
                 else Box(Modifier.fillMaxWidth().height(180.dp).background(BlueTint, RoundedCornerShape(16.dp)), contentAlignment = Alignment.Center) {
                     Text(if (loading) "Kaart en stations laden…" else "De kaart met stations verschijnt hier", color = Muted, fontSize = 12.sp)
                 }
@@ -1340,7 +1349,7 @@ private fun StationsTab(context: Context, prefs: android.content.SharedPreferenc
                 }
             }
         }
-        stations.forEach { station ->
+        visibleStations.forEach { station ->
             Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)) {
                 Row(Modifier.fillMaxWidth().padding(14.dp), horizontalArrangement = Arrangement.spacedBy(11.dp), verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.size(38.dp).background(if (station.kind == "Tankstation") Color(0xFFFFF2E7) else BlueTint, RoundedCornerShape(13.dp)), contentAlignment = Alignment.Center) {
@@ -1367,41 +1376,50 @@ private fun currentLocation(context: Context): Location? {
     } catch (_: SecurityException) { null }
 }
 
-private fun findNearbyStations(latitude: Double, longitude: Double, filter: String): List<NearbyStation> {
-    val clauses = when (filter) {
-        "Tankstations" -> "node(around:5000,$latitude,$longitude)[amenity=fuel];way(around:5000,$latitude,$longitude)[amenity=fuel];"
-        "Laadpunten" -> "node(around:5000,$latitude,$longitude)[amenity=charging_station];way(around:5000,$latitude,$longitude)[amenity=charging_station];"
-        else -> "node(around:5000,$latitude,$longitude)[amenity=fuel];way(around:5000,$latitude,$longitude)[amenity=fuel];node(around:5000,$latitude,$longitude)[amenity=charging_station];way(around:5000,$latitude,$longitude)[amenity=charging_station];"
+private fun findNearbyStations(latitude: Double, longitude: Double): List<NearbyStation> {
+    val clauses = "node(around:5000,$latitude,$longitude)[amenity=fuel];way(around:5000,$latitude,$longitude)[amenity=fuel];" +
+        "node(around:5000,$latitude,$longitude)[amenity=charging_station];way(around:5000,$latitude,$longitude)[amenity=charging_station];"
+    val query = "[out:json][timeout:15];($clauses);out center tags;"
+    val endpoints = listOf(
+        "https://ovp.dresel.systems/api/interpreter",
+        "https://overpass.private.coffee/api/interpreter",
+        "https://overpass-api.de/api/interpreter"
+    )
+    var lastError = "geen antwoord"
+    for (endpoint in endpoints) {
+        val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"; doOutput = true; connectTimeout = 10000; readTimeout = 18000
+            setRequestProperty("User-Agent", "VLOTRIT/1.18 (Android; https://github.com/Redglowmk3/vlotrit)")
+            setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+        }
+        try {
+            connection.outputStream.use { it.write(("data=" + java.net.URLEncoder.encode(query, "UTF-8")).toByteArray(Charsets.UTF_8)) }
+            val responseCode = connection.responseCode
+            if (responseCode !in 200..299) error("HTTP $responseCode")
+            val elements = JSONObject(connection.inputStream.bufferedReader().use { it.readText() }).optJSONArray("elements") ?: JSONArray()
+            return (0 until elements.length()).mapNotNull { i ->
+                val item = elements.optJSONObject(i) ?: return@mapNotNull null
+                val tags = item.optJSONObject("tags") ?: JSONObject()
+                val kind = if (tags.optString("amenity") == "fuel") "Tankstation" else if (tags.optString("amenity") == "charging_station") "Laadpunt" else return@mapNotNull null
+                val center = item.optJSONObject("center")
+                val lat = if (item.has("lat")) item.optDouble("lat") else center?.optDouble("lat") ?: Double.NaN
+                val lon = if (item.has("lon")) item.optDouble("lon") else center?.optDouble("lon") ?: Double.NaN
+                if (lat.isNaN() || lon.isNaN()) return@mapNotNull null
+                val displayName = tags.optString("name").ifBlank { tags.optString("brand").ifBlank { tags.optString("operator").ifBlank { kind } } }
+                val address = listOf(tags.optString("addr:street"), tags.optString("addr:housenumber"), tags.optString("addr:city"))
+                    .filter { it.isNotBlank() }.joinToString(" ")
+                val details = if (kind == "Laadpunt") listOf(tags.optString("socket:type2").takeIf { it.isNotBlank() }?.let { "Type 2 $it" },
+                    tags.optString("socket:ccs").takeIf { it.isNotBlank() }?.let { "CCS $it" }, tags.optString("capacity").takeIf { it.isNotBlank() })
+                    .filterNotNull().joinToString(" · ") else tags.optString("fuel:e10").takeIf { it.isNotBlank() }?.let { "E10: $it" }.orEmpty()
+                val distance = FloatArray(1)
+                Location.distanceBetween(latitude, longitude, lat, lon, distance)
+                NearbyStation(displayName, kind, address, lat, lon, distance[0] / 1000.0, details)
+            }.distinctBy { "${it.latitude},${it.longitude}" }.sortedBy { it.distanceKm }.take(40)
+        } catch (e: Exception) {
+            lastError = e.message ?: "onbekende fout"
+        } finally { connection.disconnect() }
     }
-    val query = "[out:json][timeout:25];($clauses);out center tags;"
-    val connection = (URL("https://overpass-api.de/api/interpreter").openConnection() as HttpURLConnection).apply {
-        requestMethod = "POST"; doOutput = true; connectTimeout = 20000; readTimeout = 30000
-        setRequestProperty("User-Agent", "VLOTRIT Android personal vehicle cost app")
-        setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
-    }
-    return try {
-        connection.outputStream.use { it.write(("data=" + java.net.URLEncoder.encode(query, "UTF-8")).toByteArray(Charsets.UTF_8)) }
-        if (connection.responseCode !in 200..299) error("OpenStreetMap zoeken is tijdelijk niet beschikbaar (HTTP ${connection.responseCode}).")
-        val elements = JSONObject(connection.inputStream.bufferedReader().use { it.readText() }).optJSONArray("elements") ?: JSONArray()
-        (0 until elements.length()).mapNotNull { i ->
-            val item = elements.optJSONObject(i) ?: return@mapNotNull null
-            val tags = item.optJSONObject("tags") ?: JSONObject()
-            val kind = if (tags.optString("amenity") == "fuel") "Tankstation" else if (tags.optString("amenity") == "charging_station") "Laadpunt" else return@mapNotNull null
-            val center = item.optJSONObject("center")
-            val lat = if (item.has("lat")) item.optDouble("lat") else center?.optDouble("lat") ?: Double.NaN
-            val lon = if (item.has("lon")) item.optDouble("lon") else center?.optDouble("lon") ?: Double.NaN
-            if (lat.isNaN() || lon.isNaN()) return@mapNotNull null
-            val displayName = tags.optString("name").ifBlank { tags.optString("brand").ifBlank { tags.optString("operator").ifBlank { kind } } }
-            val address = listOf(tags.optString("addr:street"), tags.optString("addr:housenumber"), tags.optString("addr:city"))
-                .filter { it.isNotBlank() }.joinToString(" ")
-            val details = if (kind == "Laadpunt") listOf(tags.optString("socket:type2").takeIf { it.isNotBlank() }?.let { "Type 2 $it" },
-                tags.optString("socket:ccs").takeIf { it.isNotBlank() }?.let { "CCS $it" }, tags.optString("capacity").takeIf { it.isNotBlank() })
-                .filterNotNull().joinToString(" · ") else tags.optString("fuel:e10").takeIf { it.isNotBlank() }?.let { "E10: $it" }.orEmpty()
-            val distance = FloatArray(1)
-            Location.distanceBetween(latitude, longitude, lat, lon, distance)
-            NearbyStation(displayName, kind, address, lat, lon, distance[0] / 1000.0, details)
-        }.distinctBy { "${it.latitude},${it.longitude}" }.sortedBy { it.distanceKm }.take(40)
-    } finally { connection.disconnect() }
+    error("Stations zoeken is tijdelijk niet beschikbaar. Laatste fout: $lastError")
 }
 
 private fun openAnwbStations(context: Context) {
@@ -1410,25 +1428,49 @@ private fun openAnwbStations(context: Context) {
 }
 
 @Composable
-private fun StationMap(stations: List<NearbyStation>, center: Pair<Double, Double>, modifier: Modifier = Modifier) {
-    val mapData = remember(stations, center) {
-        JSONArray().apply { stations.forEach { put(JSONArray().put(it.latitude).put(it.longitude).put(if (it.kind == "Tankstation") "fuel" else "charge")) } }.toString()
+private fun StationMap(stations: List<NearbyStation>, center: Pair<Double, Double>, hasGpsCenter: Boolean, modifier: Modifier = Modifier) {
+    val markers = remember(stations) {
+        JSONArray().apply { stations.forEach { station -> put(JSONObject().put("lat", station.latitude).put("lon", station.longitude)
+            .put("name", station.name).put("kind", station.kind).put("address", station.address).put("details", station.details)) } }.toString()
     }
+    val script = remember(markers, center) {
+        """const stations=$markers,me=[${center.first},${center.second}];
+            const map=L.map('map',{zoomControl:true,scrollWheelZoom:false,preferCanvas:true});
+            const primary=L.tileLayer('https://tile.openstreetmap.de/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'});
+            const fallback=L.tileLayer('https://a.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'});
+            let tileErrors=0,usingFallback=false; primary.on('tileerror',()=>{tileErrors++;if(tileErrors>=2&&!usingFallback){usingFallback=true;map.removeLayer(primary);fallback.addTo(map)}});primary.addTo(map);
+            const points=[L.latLng(me[0],me[1])];
+            L.circleMarker(me,{radius:8,color:'#ffffff',weight:3,fillColor:'#14395f',fillOpacity:1}).bindPopup('Jouw locatie').addTo(map);
+            function safe(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+            stations.forEach(s=>{const p=L.latLng(s.lat,s.lon);points.push(p);const fuel=s.kind==='Tankstation';const marker=L.circleMarker(p,{radius:8,color:'#fff',weight:2,fillColor:fuel?'#ef8a3c':'#1883bd',fillOpacity:1});marker.bindPopup('<b>'+safe(s.name)+'</b><br>'+safe(s.kind)+(s.address?'<br>'+safe(s.address):'')+(s.details?'<br>'+safe(s.details):''));marker.addTo(map)});
+            if(!hasGpsCenter&&stations.length===0){map.setView(me,7)}else{map.fitBounds(L.latLngBounds(points).pad(0.2),{maxZoom:15})}setTimeout(()=>map.invalidateSize(),250);""".replace("!hasGpsCenter", "!${hasGpsCenter}")
+    }
+    MapWebView(script, modifier)
+}
+
+private fun loadMapHtml(context: Context, script: String): String {
+    val css = context.assets.open("leaflet.css").bufferedReader().use { it.readText() }
+    val js = context.assets.open("leaflet.js").bufferedReader().use { it.readText() }
+    return """<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><style>$css html,body,#map{width:100%;height:100%;margin:0;padding:0;background:#eef3f7}body{overflow:hidden}</style></head><body><div id="map"></div><script>$js</script><script>$script</script></body></html>"""
+}
+
+@Composable
+private fun MapWebView(script: String, modifier: Modifier) {
+    val context = LocalContext.current
+    val html = remember(context, script) { loadMapHtml(context, script) }
     AndroidView(modifier = modifier, factory = { ctx ->
-        WebView(ctx).apply { settings.javaScriptEnabled = true; settings.domStorageEnabled = true; settings.userAgentString = "VLOTRIT Android stations map"; webViewClient = WebViewClient() }
+        WebView(ctx).apply {
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
+            settings.cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
+            settings.userAgentString = "VLOTRIT/1.18 (Android; https://github.com/Redglowmk3/vlotrit)"
+            webViewClient = WebViewClient()
+            setBackgroundColor(android.graphics.Color.rgb(238, 243, 247))
+        }
     }, update = { web ->
-        if (web.tag != mapData) {
-            web.tag = mapData
-            val html = """<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#eef3f7}canvas{width:100%;height:100%;display:block}</style></head><body><canvas id="map"></canvas><script>
-                const pts=$mapData,me=[${center.first},${center.second}],c=document.getElementById('map'),ctx=c.getContext('2d'),W=720,H=430,pad=28;c.width=W;c.height=H;
-                function tp(p,z){const n=2**z,lat=Math.max(-85.0511,Math.min(85.0511,p[0]))*Math.PI/180;return{x:(p[1]+180)/360*n*256,y:(1-Math.asinh(Math.tan(lat))/Math.PI)/2*n*256}}
-                const all=pts.map(p=>[p[0],p[1]]).concat([me]);let z=15,w=[];for(;z>=9;z--){w=all.map(p=>tp(p,z));let xs=w.map(p=>p.x),ys=w.map(p=>p.y);if(Math.max(...xs)-Math.min(...xs)<W-2*pad&&Math.max(...ys)-Math.min(...ys)<H-2*pad)break}
-                const xs=w.map(p=>p.x),ys=w.map(p=>p.y);let ax=Math.min(...xs),bx=Math.max(...xs),ay=Math.min(...ys),by=Math.max(...ys);if(bx-ax<256){let m=(ax+bx)/2;ax=m-128;bx=m+128}if(by-ay<180){let m=(ay+by)/2;ay=m-90;by=m+90}
-                const s=Math.min((W-2*pad)/(bx-ax),(H-2*pad)/(by-ay)),ox=(W-(bx-ax)*s)/2-ax*s,oy=(H-(by-ay)*s)/2-ay*s,tiles=[];
-                for(let x=Math.floor(ax/256)-1;x<=Math.floor(bx/256)+1;x++)for(let y=Math.floor(ay/256)-1;y<=Math.floor(by/256)+1;y++){if(x<0||y<0||x>=2**z||y>=2**z)continue;let im=new Image();im.onload=draw;im.onerror=draw;im.src='https://tile.openstreetmap.de/'+z+'/'+x+'/'+y+'.png';tiles.push({im,x,y})}
-                function draw(){ctx.fillStyle='#eef3f7';ctx.fillRect(0,0,W,H);for(let t of tiles)if(t.im.complete&&t.im.naturalWidth)ctx.drawImage(t.im,t.x*256*s+ox,t.y*256*s+oy,256*s,256*s);for(let p of pts){let q=tp([p[0],p[1]],z),x=q.x*s+ox,y=q.y*s+oy;ctx.beginPath();ctx.arc(x,y,8,0,Math.PI*2);ctx.fillStyle=p[2]==='fuel'?'#ef8a3c':'#1883bd';ctx.fill();ctx.lineWidth=2;ctx.strokeStyle='white';ctx.stroke()}let q=tp(me,z);ctx.beginPath();ctx.arc(q.x*s+ox,q.y*s+oy,8,0,Math.PI*2);ctx.fillStyle='#193b61';ctx.fill();ctx.lineWidth=3;ctx.strokeStyle='white';ctx.stroke()}draw();
-            </script></body></html>"""
-            web.loadDataWithBaseURL("https://www.openstreetmap.de/", html, "text/html", "UTF-8", null)
+        if (web.tag != script) {
+            web.tag = script
+            web.loadDataWithBaseURL("https://tile.openstreetmap.de/", html, "text/html", "UTF-8", null)
         }
     })
 }
@@ -1871,62 +1913,18 @@ private fun RouteMap(route: String, modifier: Modifier = Modifier) {
             }
         }
     }
-    Box(modifier.background(Color(0xFFEDF1E8))) {
-        AndroidView(modifier = Modifier.fillMaxSize(), factory = { ctx ->
-            WebView(ctx).apply {
-                settings.javaScriptEnabled = true
-                settings.domStorageEnabled = true
-                settings.userAgentString = "VLOTRIT Android route map"
-                webViewClient = WebViewClient()
-            }
-        }, update = { web ->
-            if (web.tag != route) {
-                web.tag = route
-                val coords = points.joinToString(",") { "[${it.first},${it.second}]" }
-                val html = """<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#edf1e8}canvas{width:100%;height:100%;display:block}</style></head><body><canvas id="map"></canvas><script>
-                    const pts=[$coords],c=document.getElementById('map'),ctx=c.getContext('2d'),W=640,H=300,pad=24;c.width=W;c.height=H;
-                    function tp(p,z){const n=2**z,lat=Math.max(-85.0511,Math.min(85.0511,p[0]))*Math.PI/180;return{x:(p[1]+180)/360*n*256,y:(1-Math.asinh(Math.tan(lat))/Math.PI)/2*n*256}}
-                    let z=16,w=[];for(;z>=4;z--){w=pts.map(p=>tp(p,z));if(!w.length)break;let xs=w.map(p=>p.x),ys=w.map(p=>p.y);if(Math.max(...xs)-Math.min(...xs)<W-100&&Math.max(...ys)-Math.min(...ys)<H-100)break}
-                    let ax=0,bx=256,ay=0,by=256;if(w.length){ax=Math.min(...w.map(p=>p.x));bx=Math.max(...w.map(p=>p.x));ay=Math.min(...w.map(p=>p.y));by=Math.max(...w.map(p=>p.y));if(bx-ax<256){let m=(ax+bx)/2;ax=m-128;bx=m+128}if(by-ay<180){let m=(ay+by)/2;ay=m-90;by=m+90}}
-                    let s=Math.min((W-2*pad)/(bx-ax),(H-2*pad)/(by-ay)),ox=(W-(bx-ax)*s)/2-ax*s,oy=(H-(by-ay)*s)/2-ay*s,tiles=[];
-                    for(let x=Math.floor(ax/256)-1;x<=Math.floor(bx/256)+1;x++)for(let y=Math.floor(ay/256)-1;y<=Math.floor(by/256)+1;y++){if(x<0||y<0||x>=2**z||y>=2**z)continue;let im=new Image();im.onload=draw;im.onerror=draw;im.src='https://tile.openstreetmap.de/'+z+'/'+x+'/'+y+'.png';tiles.push({im,x,y})}
-                    function draw(){ctx.fillStyle='#edf1e8';ctx.fillRect(0,0,W,H);for(let t of tiles)if(t.im.complete&&t.im.naturalWidth)ctx.drawImage(t.im,t.x*256*s+ox,t.y*256*s+oy,256*s,256*s);if(w.length){ctx.beginPath();w.forEach((p,i)=>{let x=p.x*s+ox,y=p.y*s+oy;i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.lineJoin='round';ctx.lineCap='round';ctx.strokeStyle='white';ctx.lineWidth=9;ctx.stroke();ctx.strokeStyle='#176b4b';ctx.lineWidth=5;ctx.stroke();let a=w[0],b=w[w.length-1];for(let q of [a,b]){ctx.beginPath();ctx.arc(q.x*s+ox,q.y*s+oy,6,0,Math.PI*2);ctx.fillStyle=q===a?'#176b4b':'#e4774d';ctx.fill();ctx.strokeStyle='white';ctx.lineWidth=2;ctx.stroke()}}}draw();
-                </script></body></html>"""
-                web.loadDataWithBaseURL("https://www.openstreetmap.de/", html, "text/html", "UTF-8", null)
-            }
-        })
-        Canvas(Modifier.fillMaxSize()) {
-            if (points.isNotEmpty()) {
-                val minLat = points.minOf { it.first }; val maxLat = points.maxOf { it.first }
-                val minLon = points.minOf { it.second }; val maxLon = points.maxOf { it.second }
-                val latSpan = (maxLat - minLat).coerceAtLeast(0.0001)
-                val lonSpan = (maxLon - minLon).coerceAtLeast(0.0001)
-                val pad = 28.dp.toPx()
-                val scale = minOf((size.width - 2 * pad) / lonSpan.toFloat(), (size.height - 2 * pad) / latSpan.toFloat())
-                val routeWidth = lonSpan.toFloat() * scale
-                val routeHeight = latSpan.toFloat() * scale
-                val left = (size.width - routeWidth) / 2f
-                val top = (size.height - routeHeight) / 2f
-                val path = Path()
-                points.forEachIndexed { index, point ->
-                    val x = left + ((point.second - minLon) / lonSpan).toFloat() * routeWidth
-                    val y = top + ((maxLat - point.first) / latSpan).toFloat() * routeHeight
-                    if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
-                }
-                drawPath(path, Color.White.copy(alpha = 0.95f), style = Stroke(width = 10.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round, join = androidx.compose.ui.graphics.StrokeJoin.Round))
-                drawPath(path, Color(0xFF176B4B), style = Stroke(width = 6.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round, join = androidx.compose.ui.graphics.StrokeJoin.Round))
-                val first = points.first(); val last = points.last()
-                val firstPoint = androidx.compose.ui.geometry.Offset(left + ((first.second - minLon) / lonSpan).toFloat() * routeWidth, top + ((maxLat - first.first) / latSpan).toFloat() * routeHeight)
-                val lastPoint = androidx.compose.ui.geometry.Offset(left + ((last.second - minLon) / lonSpan).toFloat() * routeWidth, top + ((maxLat - last.first) / latSpan).toFloat() * routeHeight)
-                drawCircle(Color.White, 9.dp.toPx(), firstPoint)
-                drawCircle(Color(0xFF176B4B), 6.dp.toPx(), firstPoint)
-                drawCircle(Color.White, 9.dp.toPx(), lastPoint)
-                drawCircle(Color(0xFFE4774D), 6.dp.toPx(), lastPoint)
-            }
-        }
-        Text("START", Modifier.align(Alignment.TopStart).padding(7.dp).background(Color.White.copy(alpha = .92f), RoundedCornerShape(6.dp)).padding(horizontal = 7.dp, vertical = 4.dp), color = Forest, fontSize = 9.sp, fontWeight = FontWeight.Bold)
-        Text("EINDE", Modifier.align(Alignment.TopEnd).padding(7.dp).background(Color.White.copy(alpha = .92f), RoundedCornerShape(6.dp)).padding(horizontal = 7.dp, vertical = 4.dp), color = Color(0xFFE4774D), fontSize = 9.sp, fontWeight = FontWeight.Bold)
+    val routeJson = remember(points) { JSONArray().apply { points.forEach { put(JSONArray().put(it.first).put(it.second)) } }.toString() }
+    val script = remember(routeJson) {
+        """const pts=$routeJson, map=L.map('map',{zoomControl:true,scrollWheelZoom:false});
+           const primary=L.tileLayer('https://tile.openstreetmap.de/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'});
+           const fallback=L.tileLayer('https://a.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'});
+           let errors=0,switched=false;primary.on('tileerror',()=>{if(++errors>=2&&!switched){switched=true;map.removeLayer(primary);fallback.addTo(map)}});primary.addTo(map);
+           if(pts.length){const latlngs=pts.map(p=>L.latLng(p[0],p[1]));L.polyline(latlngs,{color:'#176b4b',weight:6,opacity:.95}).addTo(map);
+             L.circleMarker(latlngs[0],{radius:8,color:'#fff',weight:3,fillColor:'#176b4b',fillOpacity:1}).bindPopup('Start').addTo(map);
+             if(latlngs.length>1)L.circleMarker(latlngs[latlngs.length-1],{radius:8,color:'#fff',weight:3,fillColor:'#e4774d',fillOpacity:1}).bindPopup('Einde').addTo(map);
+             map.fitBounds(L.latLngBounds(latlngs).pad(.18),{maxZoom:15});}else{map.setView([52.1326,5.2913],7)}setTimeout(()=>map.invalidateSize(),250);"""
     }
+    MapWebView(script, modifier)
 }
 private fun routeEndpoints(route: String): Pair<Pair<Double, Double>?, Pair<Double, Double>?> {
     val points = route.split(';').mapNotNull { point ->
