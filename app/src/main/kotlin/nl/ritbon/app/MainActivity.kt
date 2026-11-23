@@ -1624,7 +1624,8 @@ private fun MapWebView(script: String, modifier: Modifier) {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
-            settings.userAgentString = "VLOTRIT/1.19 (Android; https://github.com/Redglowmk3/vlotrit)"
+            val webViewAgent = android.webkit.WebSettings.getDefaultUserAgent(ctx)
+            settings.userAgentString = "$webViewAgent VLOTRIT/1.20 (+https://github.com/Redglowmk3/vlotrit)"
             webViewClient = WebViewClient()
             setBackgroundColor(android.graphics.Color.rgb(238, 243, 247))
         }
