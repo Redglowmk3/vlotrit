@@ -2,6 +2,7 @@ package nl.ritbon.app
 
 import android.Manifest
 import android.app.PendingIntent
+import android.app.DatePickerDialog
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -110,6 +111,7 @@ private const val KEY_ACTIVE_CONSUMPTION = "active_consumption"
 private const val KEY_ACTIVE_PRICE = "active_price"
 private const val KEY_ACTIVE_DEPRECIATION = "active_depreciation"
 private const val KEY_ACTIVE_DEPRECIATION_RATE = "active_depreciation_rate"
+private const val KEY_MAINTENANCE_REMINDERS = "maintenance_reminders"
 
 private val Forest = Color(0xFF176DB3)
 private val Ink = Color(0xFF14283F)
@@ -137,7 +139,8 @@ private data class TripRecord(
     val consumption: Float, val price: Float, val priceUpdatedAt: Long, val startedAt: Long, val stoppedAt: Long, val route: String,
     val electric: Boolean = false, val startLocation: String = "", val endLocation: String = "",
     val depreciationEnabled: Boolean = false, val depreciationPerKm: Float = 0.15f,
-    val vehicleId: String = "", val vehicleName: String = "", val fuelType: String = "", val actualEnergy: Float? = null
+    val vehicleId: String = "", val vehicleName: String = "", val fuelType: String = "", val actualEnergy: Float? = null,
+    val category: String = "Privé", val passengers: List<String> = emptyList()
 ) {
     val estimatedEnergyAmount get() = distanceKm * consumption / 100f
     val energyAmount get() = actualEnergy ?: estimatedEnergyAmount
@@ -230,7 +233,8 @@ private fun readHistory(prefs: android.content.SharedPreferences): List<TripReco
             o.optLong("priceUpdatedAt"), o.optLong("startedAt"), o.optLong("stoppedAt"), o.optString("route"), o.optBoolean("electric", false),
             o.optString("startLocation"), o.optString("endLocation"), o.optBoolean("depreciationEnabled", false), o.optDouble("depreciationPerKm", 0.15).toFloat(),
             o.optString("vehicleId"), o.optString("vehicleName"), o.optString("fuelType", if (o.optBoolean("electric", false)) "Elektrisch" else "E10"),
-            if (o.isNull("actualEnergy")) null else o.optDouble("actualEnergy").toFloat())
+            if (o.isNull("actualEnergy")) null else o.optDouble("actualEnergy").toFloat(),
+            o.optString("category", "Privé"), (o.optJSONArray("passengers") ?: JSONArray()).let { names -> (0 until names.length()).map { names.optString(it) }.filter { it.isNotBlank() } })
     }
     if (trips.isNotEmpty()) {
         prefs.edit().putBoolean(KEY_HISTORY_MIGRATED, true).apply()
@@ -259,7 +263,7 @@ private fun writeHistory(prefs: android.content.SharedPreferences, trips: List<T
         .put("startLocation", t.startLocation).put("endLocation", t.endLocation)
         .put("depreciationEnabled", t.depreciationEnabled).put("depreciationPerKm", t.depreciationPerKm)
         .put("vehicleId", t.vehicleId).put("vehicleName", t.vehicleName).put("fuelType", t.fuelType)
-        .put("actualEnergy", t.actualEnergy ?: JSONObject.NULL)) }
+        .put("actualEnergy", t.actualEnergy ?: JSONObject.NULL).put("category", t.category).put("passengers", JSONArray(t.passengers))) }
     prefs.edit().putString(KEY_HISTORY, array.toString()).apply()
 }
 
@@ -288,7 +292,8 @@ internal fun saveAutomaticBusinessTrip(prefs: android.content.SharedPreferences)
         prefs.getLong(KEY_STARTED_AT, stoppedAt), stoppedAt, route, electric,
         endpoints.first?.let(::coordinateLabel).orEmpty(), endpoints.second?.let(::coordinateLabel).orEmpty(),
         prefs.getBoolean(KEY_ACTIVE_DEPRECIATION, false), prefs.getFloat(KEY_ACTIVE_DEPRECIATION_RATE, 0.15f),
-        prefs.getString(KEY_ACTIVE_VEHICLE_ID, "").orEmpty(), prefs.getString(KEY_ACTIVE_VEHICLE_NAME, "").orEmpty(), fuelType
+        prefs.getString(KEY_ACTIVE_VEHICLE_ID, "").orEmpty(), prefs.getString(KEY_ACTIVE_VEHICLE_NAME, "").orEmpty(), fuelType,
+        category = "Zakelijk"
     )
     writeHistory(prefs, listOf(record) + readHistory(prefs))
     prefs.edit().putBoolean(KEY_BUSINESS_TRIP_ACTIVE, false).putBoolean(KEY_RUNNING, false)
@@ -477,7 +482,7 @@ private fun RitbonApp() {
                 }
             }
             UpdateCard(context, prefs)
-            if (selectedTab !in 7..8) VehicleProfilesCard(profiles, selectedVehicle.id, enabled = !running && !workdayActive,
+            if (selectedTab !in 7..9) VehicleProfilesCard(profiles, selectedVehicle.id, enabled = !running && !workdayActive,
                 onSelect = ::selectVehicle,
                 onSave = { profile ->
                     profiles = (profiles.filterNot { it.id == profile.id } + profile)
@@ -505,6 +510,7 @@ private fun RitbonApp() {
                 Tab(selected = selectedTab == 6, onClick = { selectedTab = 6 }, text = { Text("Laadbeurten") })
                 Tab(selected = selectedTab == 7, onClick = { selectedTab = 7 }, text = { Text("Stations") })
                 Tab(selected = selectedTab == 8, onClick = { selectedTab = 8 }, text = { Text("Info") })
+                Tab(selected = selectedTab == 9, onClick = { selectedTab = 9 }, text = { Text("Onderhoud") })
             }
             if (selectedTab == 2) {
                 TripHistory(context, prefs, history, selectedHistoryId, selectedVehicle,
@@ -558,6 +564,8 @@ private fun RitbonApp() {
                 StationsTab(context, prefs)
             } else if (selectedTab == 8) {
                 AppInfoTab(context)
+            } else if (selectedTab == 9) {
+                MaintenanceTab(prefs, prefs.getFloat(KEY_LAST_ODO, prefs.getFloat(KEY_END_ODO, 0f)))
             } else {
             val electricTab = selectedTab == 1
             val activeElectric = prefs.getBoolean(KEY_TRIP_ELECTRIC, false)
@@ -651,7 +659,8 @@ private fun RitbonApp() {
                                 savedRoute, tripIsElectric, endpoints.first?.let(::coordinateLabel).orEmpty(), endpoints.second?.let(::coordinateLabel).orEmpty(),
                                 prefs.getBoolean(KEY_ACTIVE_DEPRECIATION, prefs.getBoolean(if (tripIsElectric) KEY_ELECTRIC_DEPRECIATION else KEY_FUEL_DEPRECIATION, false)),
                                 prefs.getFloat(KEY_ACTIVE_DEPRECIATION_RATE, prefs.getFloat(KEY_DEPRECIATION_RATE, 0.15f)),
-                                prefs.getString(KEY_ACTIVE_VEHICLE_ID, "").orEmpty(), prefs.getString(KEY_ACTIVE_VEHICLE_NAME, "").orEmpty(), tripFuelType)
+                                prefs.getString(KEY_ACTIVE_VEHICLE_ID, "").orEmpty(), prefs.getString(KEY_ACTIVE_VEHICLE_NAME, "").orEmpty(), tripFuelType,
+                                category = "Privé")
                             history = listOf(record) + readHistory(prefs)
                             writeHistory(prefs, history)
                             if (endpoints.first != null || endpoints.second != null) {
@@ -708,6 +717,7 @@ private fun HeroBanner(selectedTab: Int) {
         6 -> "ELEKTRISCH LADEN"
         7 -> "TANKEN & LADEN"
         8 -> "OVER VLOTRIT"
+        9 -> "ONDERHOUD & HERINNERINGEN"
         else -> "BRANDSTOF & KILOMETERS"
     }
     val title = when (selectedTab) {
@@ -719,6 +729,7 @@ private fun HeroBanner(selectedTab: Int) {
         6 -> "Elke laadbeurt\noverzichtelijk."
         7 -> "Vind een plek\nin de buurt."
         8 -> "Alle ritinfo.\nOp één plek."
+        9 -> "Onderhoud op\ntijd geregeld."
         else -> "Elke rit.\nHelder geregeld."
     }
     val subtitle = when (selectedTab) {
@@ -730,6 +741,7 @@ private fun HeroBanner(selectedTab: Int) {
         6 -> "Bewaar kWh, laadprijs en locatie per sessie."
         7 -> "Bekijk nabije tankstations en laadpunten op de kaart."
         8 -> "Bekijk appversie, gegevens en updates."
+        9 -> "Bewaar APK-, onderhouds- en bandenwisseldata."
         else -> "Afstand, verbruik en kosten overzichtelijk bij elkaar."
     }
     Box(
@@ -1269,6 +1281,66 @@ private fun ChargeSessionsTab(prefs: android.content.SharedPreferences, vehicle:
                             Text("${session.pricePerKwh.euro()} per kWh", color = Muted, fontSize = 11.sp)
                         }
                         TextButton(onClick = { sessions = sessions.filterNot { it.id == session.id }; writeChargeSessions(prefs, sessions) }) { Text("Verwijder", color = Color(0xFFB14F45), fontSize = 11.sp) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+@OptIn(ExperimentalMaterial3Api::class)
+private fun MaintenanceTab(prefs: android.content.SharedPreferences, currentOdometer: Float) {
+    val context = LocalContext.current
+    val reminders = remember { mutableStateListOf<JSONObject>().apply {
+        try { val array = JSONArray(prefs.getString(KEY_MAINTENANCE_REMINDERS, "[]")); for (i in 0 until array.length()) add(array.getJSONObject(i)) } catch (_: Exception) { }
+    } }
+    var kind by remember { mutableStateOf("APK") }
+    var dueDate by remember { mutableStateOf("") }
+    var dueOdo by remember { mutableStateOf("") }
+    var note by remember { mutableStateOf("") }
+    fun persist() = prefs.edit().putString(KEY_MAINTENANCE_REMINDERS, JSONArray(reminders).toString()).apply()
+    Card(shape = RoundedCornerShape(21.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
+        Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("Voertuig herinneringen", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Ink)
+            Text("Plan APK, onderhoud en bandenwissels op datum of kilometerstand.", color = Muted, fontSize = 13.sp)
+            var expanded by remember { mutableStateOf(false) }
+            ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
+                OutlinedTextField(kind, {}, readOnly = true, label = { Text("Type herinnering") }, modifier = Modifier.fillMaxWidth().menuAnchor())
+                ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                    listOf("APK", "Onderhoud", "Bandenwissel").forEach { item -> DropdownMenuItem(text = { Text(item) }, onClick = { kind = item; expanded = false }) }
+                }
+            }
+            OutlinedButton(onClick = {
+                val cal = java.util.Calendar.getInstance()
+                DatePickerDialog(context, { _, year, month, day -> dueDate = "%04d-%02d-%02d".format(year, month + 1, day) }, cal.get(java.util.Calendar.YEAR), cal.get(java.util.Calendar.MONTH), cal.get(java.util.Calendar.DAY_OF_MONTH)).show()
+            }, modifier = Modifier.fillMaxWidth()) { Text(if (dueDate.isBlank()) "Kies datum" else "Datum: $dueDate") }
+            NumericField("Bij kilometerstand (optioneel)", dueOdo, { dueOdo = it }, "km", Modifier.fillMaxWidth(), true)
+            OutlinedTextField(note, { note = it }, modifier = Modifier.fillMaxWidth(), label = { Text("Notitie (optioneel)") }, singleLine = true)
+            Button(onClick = {
+                val odo = dueOdo.replace(',', '.').toFloatOrNull() ?: 0f
+                if (dueDate.isNotBlank() || odo > 0f) {
+                    reminders.add(JSONObject().put("id", System.currentTimeMillis()).put("kind", kind).put("date", dueDate).put("odometer", odo).put("note", note.trim()))
+                    persist(); dueDate = ""; dueOdo = ""; note = ""
+                }
+            }, enabled = dueDate.isNotBlank() || (dueOdo.replace(',', '.').toFloatOrNull() ?: 0f) > 0f, modifier = Modifier.fillMaxWidth()) { Text("Herinnering opslaan") }
+            HorizontalDivider()
+            Text("Opgeslagen herinneringen", color = Ink, fontWeight = FontWeight.Bold)
+            if (reminders.isEmpty()) Text("Nog geen herinneringen. Stel bijvoorbeeld de volgende APK-datum in.", color = Muted, fontSize = 12.sp)
+            reminders.sortedBy { it.optString("date", "9999") }.forEach { reminder ->
+                val date = reminder.optString("date", "")
+                val odo = reminder.optDouble("odometer", 0.0).toFloat()
+                val overdueDate = date.isNotBlank() && date < LocalDate.now().toString()
+                val overdueOdo = odo > 0f && currentOdometer >= odo
+                Card(colors = CardDefaults.cardColors(containerColor = if (overdueDate || overdueOdo) Color(0xFFFFF0E9) else BlueTint), shape = RoundedCornerShape(15.dp)) {
+                    Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text(reminder.optString("kind"), fontWeight = FontWeight.Bold, color = Ink)
+                            Text(listOfNotNull(date.takeIf { it.isNotBlank() }, (if (odo > 0f) "${odo.formatNl()} km" else null)).joinToString(" · "), color = Muted, fontSize = 12.sp)
+                            if (reminder.optString("note").isNotBlank()) Text(reminder.optString("note"), color = Muted, fontSize = 12.sp)
+                            if (overdueDate || overdueOdo) Text("Aandacht nodig", color = Color(0xFFAA4328), fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                        }
+                        TextButton(onClick = { reminders.remove(reminder); persist() }) { Text("Verwijder") }
                     }
                 }
             }
@@ -1837,6 +1909,7 @@ private fun TripHistory(context: Context, prefs: android.content.SharedPreferenc
     var selectedIds by remember { mutableStateOf(setOf<Long>()) }
     var confirmDelete by remember { mutableStateOf(false) }
     var typeFilter by remember { mutableStateOf("Alle") }
+    var categoryFilter by remember { mutableStateOf("Alle") }
     var monthFilter by remember { mutableStateOf("") }
     var yearFilter by remember { mutableStateOf(SimpleDateFormat("yyyy", Locale.US).format(Date())) }
     var searchQuery by remember { mutableStateOf("") }
@@ -1846,7 +1919,7 @@ private fun TripHistory(context: Context, prefs: android.content.SharedPreferenc
         val monthOk = monthFilter.isBlank() || date == monthFilter.trim()
         val yearOk = yearFilter.isBlank() || date.startsWith(yearFilter.trim())
         val textOk = searchQuery.isBlank() || trip.name.contains(searchQuery.trim(), true) || trip.vehicleName.contains(searchQuery.trim(), true)
-        typeOk && monthOk && yearOk && textOk
+        typeOk && monthOk && yearOk && textOk && (categoryFilter == "Alle" || trip.category == categoryFilter)
     }
     val totalKm = filteredTrips.sumOf { it.distanceKm.toDouble() }.toFloat()
     val totalCost = filteredTrips.sumOf { it.cost.toDouble() }.toFloat()
@@ -1868,6 +1941,11 @@ private fun TripHistory(context: Context, prefs: android.content.SharedPreferenc
             Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                 listOf("Alle", "Brandstof", "Elektrisch").forEach { option ->
                     FilterChip(selected = typeFilter == option, onClick = { typeFilter = option }, label = { Text(option) })
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                listOf("Alle", "Privé", "Zakelijk").forEach { option ->
+                    FilterChip(selected = categoryFilter == option, onClick = { categoryFilter = option }, label = { Text(option) })
                 }
             }
             OutlinedTextField(searchQuery, { searchQuery = it }, modifier = Modifier.fillMaxWidth(), label = { Text("Zoek op label of notitie") }, singleLine = true)
@@ -1901,7 +1979,7 @@ private fun TripHistory(context: Context, prefs: android.content.SharedPreferenc
                 Column {
                     Row(Modifier.fillMaxWidth().clickable { onSelect(trip.id) }.padding(vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                            Text("${trip.fuelType.ifBlank { if (trip.electric) "Elektrisch" else "E10" }} · ${trip.name.ifBlank { trip.vehicleName.ifBlank { "Rit" } }}", color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                            Text("${trip.category} · ${trip.fuelType.ifBlank { if (trip.electric) "Elektrisch" else "E10" }} · ${trip.name.ifBlank { trip.vehicleName.ifBlank { "Rit" } }}", color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
                             Text("${Date(trip.stoppedAt).clock()}  ·  ${trip.distanceKm.formatNl()} km", color = Muted, fontSize = 11.sp)
                         }
                         Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(3.dp)) {
@@ -1914,8 +1992,28 @@ private fun TripHistory(context: Context, prefs: android.content.SharedPreferenc
                     }
                     if (selectedId == trip.id) {
                         if (trip.vehicleName.isNotBlank()) HistoryDetailLine("Voertuig", "${trip.vehicleName} · ${trip.fuelType}")
+                        var newCategory by remember(trip.id, trip.category) { mutableStateOf(trip.category) }
+                        var passengers by remember(trip.id, trip.passengers) { mutableStateOf(trip.passengers.joinToString(", ")) }
                         HorizontalDivider(color = Color(0xFFE5EBE5))
                         Column(Modifier.padding(top = 10.dp, bottom = 7.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(7.dp), verticalAlignment = Alignment.CenterVertically) {
+                                listOf("Privé", "Zakelijk").forEach { category -> FilterChip(selected = newCategory == category, onClick = { newCategory = category }, label = { Text(category) }) }
+                                TextButton(onClick = {
+                                    val updated = trips.map { if (it.id == trip.id) it.copy(category = newCategory) else it }
+                                    writeHistory(prefs, updated); onTripsChanged(updated)
+                                }) { Text("Bewaar categorie") }
+                            }
+                            OutlinedTextField(passengers, { passengers = it }, modifier = Modifier.fillMaxWidth(), label = { Text("Samenrit · passagiers, gescheiden met komma") }, supportingText = { Text("Kosten worden gelijk verdeeld, inclusief jouw aandeel als bestuurder.") })
+                            Button(onClick = {
+                                val names = passengers.split(",", ";", "\n").map { it.trim() }.filter { it.isNotBlank() }.distinct()
+                                val updated = trips.map { if (it.id == trip.id) it.copy(passengers = names) else it }
+                                writeHistory(prefs, updated); onTripsChanged(updated)
+                            }, enabled = passengers.isNotBlank()) { Text("Bewaar samenrit") }
+                            if (trip.passengers.isNotEmpty()) {
+                                val share = trip.cost / (trip.passengers.size + 1)
+                                HistoryDetailLine("Jouw aandeel (${trip.passengers.size + 1} personen)", share.euro())
+                                trip.passengers.forEach { HistoryDetailLine("$it betaalt", share.euro()) }
+                            }
                             HistoryDetailLine("Beginstand → eindstand", "${trip.startKm.formatNl()} → ${trip.endKm.formatNl()} km")
                             if (trip.startLocation.isNotBlank()) HistoryDetailLine("Vertrek", trip.startLocation)
                             if (trip.endLocation.isNotBlank()) HistoryDetailLine("Aankomst", trip.endLocation)
@@ -1985,6 +2083,7 @@ private fun ActualEnergyEditor(trip: TripRecord, onSave: (Float?) -> Unit) {
 private fun shareTrip(context: Context, trip: TripRecord, body: String? = null) {
     val receiptLines = mutableListOf(
         "VLOTRIT Bon${if (trip.name.isNotBlank()) " · ${trip.name}" else ""}",
+        "Categorie: ${trip.category}",
         if (trip.vehicleName.isNotBlank()) "Voertuig: ${trip.vehicleName} (${trip.fuelType.ifBlank { if (trip.electric) "Elektrisch" else "E10" }})" else "Voertuig: ${trip.fuelType.ifBlank { if (trip.electric) "Elektrisch" else "E10" }}",
         "${trip.distanceKm.formatNl()} km gereden",
         "Gemiddeld verbruik: ${trip.estimatedEnergyAmount.formatNl()} ${trip.energyUnit} (${trip.consumption.formatNl()} ${trip.consumptionUnit})",
@@ -1998,6 +2097,11 @@ private fun shareTrip(context: Context, trip: TripRecord, body: String? = null) 
     if (trip.startLocation.isNotBlank()) receiptLines.add("Vertrek: ${trip.startLocation}")
     if (trip.endLocation.isNotBlank()) receiptLines.add("Aankomst: ${trip.endLocation}")
     if (trip.depreciationEnabled) receiptLines.add("Afschrijving (${trip.depreciationPerKm.euro()}/km): ${trip.depreciationCost.euro()}")
+    if (trip.passengers.isNotEmpty()) {
+        val share = trip.cost / (trip.passengers.size + 1)
+        receiptLines.add("Samenrit: ${trip.passengers.joinToString(", ")}")
+        receiptLines.add("Kosten per persoon incl. bestuurder (${trip.passengers.size + 1}): ${share.euro()}")
+    }
     receiptLines.add("------------------------------")
     receiptLines.add("TOTALE KOSTEN: ${trip.cost.euro()}")
     val receipt = body ?: receiptLines.joinToString("\n")
@@ -2026,10 +2130,10 @@ private fun shareTrip(context: Context, trip: TripRecord, body: String? = null) 
 
 private fun shareCsvOverview(context: Context, trips: List<TripRecord>) {
     fun cell(value: String) = "\"${value.replace("\"", "\"\"")}\""
-    val lines = mutableListOf("Datum;Label;Voertuig;Type;Km;Gemeten hoeveelheid;Verbruik per 100 km;Prijs;Afschrijving;Totaal")
+    val lines = mutableListOf("Datum;Label;Categorie;Voertuig;Type;Km;Gemeten hoeveelheid;Verbruik per 100 km;Prijs;Afschrijving;Totaal")
     trips.forEach { t ->
         val measuredRate = t.actualEnergy?.let { it * 100f / t.distanceKm.coerceAtLeast(0.01f) }?.formatNl().orEmpty()
-        lines.add(listOf(Date(t.stoppedAt).dateTime(), t.name, t.vehicleName, t.fuelType.ifBlank { if (t.electric) "Elektrisch" else "E10" },
+        lines.add(listOf(Date(t.stoppedAt).dateTime(), t.name, t.category, t.vehicleName, t.fuelType.ifBlank { if (t.electric) "Elektrisch" else "E10" },
             t.distanceKm.formatNl(), t.actualEnergy?.formatNl().orEmpty(), measuredRate, t.price.euro(), t.depreciationCost.euro(), t.cost.euro()).joinToString(";") { cell(it) })
     }
     shareTextFile(context, "Vlotrit-ritten.csv", "text/csv", lines.joinToString("\n"), "VLOTRIT rittenoverzicht")
@@ -2069,6 +2173,7 @@ private fun shareTripImage(context: Context, trip: TripRecord) {
 
 private fun tripReceiptText(trip: TripRecord): String = buildList {
     add("VLOTRIT Bon${if (trip.name.isNotBlank()) " · ${trip.name}" else ""}")
+    add("Categorie: ${trip.category}")
     if (trip.vehicleName.isNotBlank()) add("Voertuig: ${trip.vehicleName} (${trip.fuelType})")
     add("${trip.distanceKm.formatNl()} km gereden")
     add("Gemiddeld verbruik: ${trip.estimatedEnergyAmount.formatNl()} ${trip.energyUnit} (${trip.consumption.formatNl()} ${trip.consumptionUnit})")
@@ -2081,6 +2186,11 @@ private fun tripReceiptText(trip: TripRecord): String = buildList {
     if (trip.startLocation.isNotBlank()) add("Vertrek: ${trip.startLocation}")
     if (trip.endLocation.isNotBlank()) add("Aankomst: ${trip.endLocation}")
     if (trip.depreciationEnabled) add("Afschrijving (${trip.depreciationPerKm.euro()}/km): ${trip.depreciationCost.euro()}")
+    if (trip.passengers.isNotEmpty()) {
+        val share = trip.cost / (trip.passengers.size + 1)
+        add("Samenrit: ${trip.passengers.joinToString(", ")}")
+        add("Kosten per persoon incl. bestuurder (${trip.passengers.size + 1}): ${share.euro()}")
+    }
     add("------------------------------")
     add("TOTALE KOSTEN: ${trip.cost.euro()}")
 }.joinToString("\n")
@@ -2193,4 +2303,5 @@ private fun Float.euro() = NumberFormat.getCurrencyInstance(Locale("nl", "NL")).
 private fun Date.clock() = SimpleDateFormat("dd-MM HH:mm", Locale("nl", "NL")).format(this)
 private fun Date.dateTime() = SimpleDateFormat("dd-MM-yyyy HH:mm", Locale("nl", "NL")).format(this)
 private fun Long.dateTimeOrUnknown() = if (this > 0L) Date(this).dateTime() else "Niet beschikbaar"
+
 

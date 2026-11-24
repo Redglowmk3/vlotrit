@@ -12,8 +12,8 @@ android {
         applicationId = "nl.ritbon.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 22
-        versionName = "1.21"
+        versionCode = 23
+        versionName = "1.22"
     }
 
     buildFeatures { compose = true }
@@ -50,4 +50,5 @@ dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
+
 
