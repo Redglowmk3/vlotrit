@@ -2505,10 +2505,11 @@ private fun loadMapHtml(context: Context, script: String): String =
     """<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.css"><style>html,body,#map{width:100%;height:100%;margin:0;padding:0;background:#eef3f7}body{overflow:hidden}.maplibregl-ctrl-attrib{font:10px sans-serif}#map-error{display:none;position:absolute;z-index:5;left:12px;right:12px;bottom:12px;background:#fff;padding:10px 12px;border-radius:10px;color:#773d2b;font:13px sans-serif;box-shadow:0 2px 8px #0003}</style></head><body><div id="map"></div><div id="map-error">Kaart niet geladen. Controleer je internetverbinding en probeer opnieuw.</div><script>$script</script><script>(function(){const urls=['https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.js','https://cdn.jsdelivr.net/npm/maplibre-gl@5/dist/maplibre-gl.js'];let i=0;function next(){if(i>=urls.length){document.getElementById('map-error').style.display='block';return}const s=document.createElement('script');s.src=urls[i++];s.onload=()=>{if(window.maplibregl)window.initVlotritMap();else next()};s.onerror=next;document.head.appendChild(s)}next()})();</script></body></html>"""
 
 @Composable
-private fun MapWebView(script: String, modifier: Modifier, onMapReady: () -> Unit = {}) {
+private fun MapWebView(script: String, modifier: Modifier, onMapReady: () -> Unit = {}, onMapFailed: () -> Unit = {}) {
     val context = LocalContext.current
     val html = remember(context, script) { loadMapHtml(context, script) }
     val latestOnMapReady by rememberUpdatedState(onMapReady)
+    val latestOnMapFailed by rememberUpdatedState(onMapFailed)
     AndroidView(modifier = modifier, factory = { ctx ->
         WebView(ctx).apply {
             settings.javaScriptEnabled = true
@@ -2518,6 +2519,7 @@ private fun MapWebView(script: String, modifier: Modifier, onMapReady: () -> Uni
             settings.userAgentString = "$webViewAgent VLOTRIT/1.27 (+https://github.com/Redglowmk3/vlotrit)"
             addJavascriptInterface(object {
                 @JavascriptInterface fun ready() { latestOnMapReady() }
+                @JavascriptInterface fun failed() { latestOnMapFailed() }
             }, "VlotritBridge")
             webViewClient = WebViewClient()
             setBackgroundColor(android.graphics.Color.rgb(238, 243, 247))
@@ -3027,14 +3029,14 @@ private fun RouteMap(route: String, modifier: Modifier = Modifier) {
     val script = remember(routeJson) {
         """window.initVlotritMap=function(){try{
            const pts=$routeJson,map=new maplibregl.Map({container:'map',style:'https://tiles.openfreemap.org/styles/liberty',center:[5.2913,52.1326],zoom:7,attributionControl:true});
-           map.addControl(new maplibregl.NavigationControl({showCompass:false}),'top-right');map.on('error',()=>document.getElementById('map-error').style.display='block');
-           map.on('load',()=>{document.getElementById('map-error').style.display='none';if(pts.length){const coords=pts.map(p=>[p[1],p[0]]);map.addSource('route',{type:'geojson',data:{type:'Feature',properties:{},geometry:{type:'LineString',coordinates:coords}}});map.addLayer({id:'route-casing',type:'line',source:'route',layout:{'line-cap':'round','line-join':'round'},paint:{'line-color':'#ffffff','line-width':9}});map.addLayer({id:'route-line',type:'line',source:'route',layout:{'line-cap':'round','line-join':'round'},paint:{'line-color':'#176b4b','line-width':5}});new maplibregl.Marker({color:'#176b4b'}).setLngLat(coords[0]).setPopup(new maplibregl.Popup().setText('Start')).addTo(map);if(coords.length>1)new maplibregl.Marker({color:'#e4774d'}).setLngLat(coords[coords.length-1]).setPopup(new maplibregl.Popup().setText('Einde')).addTo(map);if(coords.length>1){const bounds=coords.reduce((b,p)=>b.extend(p),new maplibregl.LngLatBounds(coords[0],coords[0]));map.fitBounds(bounds,{padding:30,maxZoom:15})}}if(window.VlotritBridge)window.VlotritBridge.ready()});setTimeout(()=>map.resize(),350);setTimeout(()=>{if(!map.isStyleLoaded())document.getElementById('map-error').style.display='block'},15000);
+           let mapHadError=false,readySent=false;map.addControl(new maplibregl.NavigationControl({showCompass:false}),'top-right');map.on('error',()=>{mapHadError=true;document.getElementById('map-error').style.display='block';if(window.VlotritBridge)window.VlotritBridge.failed()});
+           map.on('load',()=>{document.getElementById('map-error').style.display='none';if(pts.length){const coords=pts.map(p=>[p[1],p[0]]);map.addSource('route',{type:'geojson',data:{type:'Feature',properties:{},geometry:{type:'LineString',coordinates:coords}}});map.addLayer({id:'route-casing',type:'line',source:'route',layout:{'line-cap':'round','line-join':'round'},paint:{'line-color':'#ffffff','line-width':9}});map.addLayer({id:'route-line',type:'line',source:'route',layout:{'line-cap':'round','line-join':'round'},paint:{'line-color':'#176b4b','line-width':5}});new maplibregl.Marker({color:'#176b4b'}).setLngLat(coords[0]).setPopup(new maplibregl.Popup().setText('Start')).addTo(map);if(coords.length>1)new maplibregl.Marker({color:'#e4774d'}).setLngLat(coords[coords.length-1]).setPopup(new maplibregl.Popup().setText('Einde')).addTo(map);if(coords.length>1){const bounds=coords.reduce((b,p)=>b.extend(p),new maplibregl.LngLatBounds(coords[0],coords[0]));map.fitBounds(bounds,{padding:30,maxZoom:15})}}});map.on('idle',()=>{if(!mapHadError&&!readySent&&map.isStyleLoaded()&&map.areTilesLoaded()){readySent=true;if(window.VlotritBridge)window.VlotritBridge.ready()}});setTimeout(()=>map.resize(),350);setTimeout(()=>{if(!map.isStyleLoaded()){mapHadError=true;document.getElementById('map-error').style.display='block';if(window.VlotritBridge)window.VlotritBridge.failed()}},15000);
            }catch(e){document.getElementById('map-error').style.display='block'}};"""
     }
     var mapReady by remember(routeJson) { mutableStateOf(false) }
     Box(modifier.clip(RoundedCornerShape(12.dp))) {
         RouteFallbackMap(points, Modifier.fillMaxSize())
-        MapWebView(script, Modifier.fillMaxSize().alpha(if (mapReady) 1f else 0f), onMapReady = { mapReady = true })
+        MapWebView(script, Modifier.fillMaxSize().alpha(if (mapReady) 1f else 0f), onMapReady = { mapReady = true }, onMapFailed = { mapReady = false })
         if (!mapReady) {
             Surface(Modifier.align(Alignment.TopStart).padding(8.dp), color = Color.White.copy(alpha = .92f), shape = RoundedCornerShape(20.dp)) {
                 Text("GPS-route · ${points.size} punten", Modifier.padding(horizontal = 10.dp, vertical = 6.dp), color = Color(0xFF176B4B), fontSize = 10.sp, fontWeight = FontWeight.Bold)
