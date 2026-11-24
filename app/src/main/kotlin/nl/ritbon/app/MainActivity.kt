@@ -30,6 +30,7 @@ import android.view.OrientationEventListener
 import android.provider.Settings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.JavascriptInterface
 import android.text.Html
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -59,6 +60,8 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.platform.ViewConfiguration
@@ -675,7 +678,7 @@ private fun RitbonApp() {
         val electricTab = selectedTab == 1
         val consumptionValue = if (electricTab) electricConsumption else consumption
         val priceValue = if (electricTab) electricPrice else price
-        if (trackGps) {
+        if (trackGps && tripNotificationChoice) {
             val fine = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
             val coarse = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
             val notificationAllowed = !tripNotificationChoice || Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
@@ -696,7 +699,7 @@ private fun RitbonApp() {
             } else {
                 startTrip(context, prefs, startOdo, consumptionValue, priceValue, tripName, electricTab, selectedVehicle, trackingEnabled = false, notificationEnabled = tripNotificationChoice)
                 running = true
-                info = if (tripNotificationChoice) "Rit gestart zonder GPS. Je kunt de afstand zelf invullen." else "Rit gestart zonder GPS of melding. Je kunt de afstand zelf invullen."
+                info = "Rit gestart zonder GPS${if (tripNotificationChoice) ". Je kunt de afstand zelf invullen." else " of melding. Je kunt de afstand zelf invullen."}"
             }
         }
     }
@@ -758,18 +761,20 @@ private fun RitbonApp() {
         else lightColorScheme(primary = Forest, secondary = Color(0xFF39A9D6), background = Paper, surface = CardSurface, onSurface = Ink)) {
       ModalNavigationDrawer(drawerState = drawerState, drawerContent = {
           ModalDrawerSheet {
-              Text("VLOTRIT", modifier = Modifier.padding(horizontal = 22.dp, vertical = 22.dp), color = Ink, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
-              HorizontalDivider()
-              listOf("Brandstof", "EV", "Ritten", "Planner", "Zakelijk", "Inzicht", "Laadbeurten", "Stations", "Onderhoud", "Voertuigen", "Instellingen", "Info").forEachIndexed { index, label ->
-                  if (index == 11) HorizontalDivider(Modifier.padding(vertical = 8.dp))
-                  NavigationDrawerItem(label = { Text(label) }, selected = selectedTab == index, onClick = {
-                      when (index) {
-                          0 -> if (running || workdayActive) { if (!prefs.getBoolean(KEY_TRIP_ELECTRIC, false)) selectedTab = 0 } else profiles.firstOrNull { !it.electric }?.let { selectVehicle(it) }
-                          1 -> if (running || workdayActive) { if (prefs.getBoolean(KEY_TRIP_ELECTRIC, false)) selectedTab = 1 } else profiles.firstOrNull { it.electric }?.let { selectVehicle(it) }
-                          else -> selectedTab = index
-                      }
-                      coroutineScope.launch { drawerState.close() }
-                  }, modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding))
+              Column(Modifier.verticalScroll(rememberScrollState()).padding(vertical = 8.dp)) {
+                  Text("VLOTRIT", modifier = Modifier.padding(horizontal = 22.dp, vertical = 22.dp), color = Ink, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
+                  HorizontalDivider()
+                  listOf("Brandstof", "EV", "Ritten", "Planner", "Zakelijk", "Inzicht", "Laadbeurten", "Stations", "Onderhoud", "Voertuigen", "Instellingen", "Info").forEachIndexed { index, label ->
+                      if (index == 11) HorizontalDivider(Modifier.padding(vertical = 8.dp))
+                      NavigationDrawerItem(label = { Text(label) }, selected = selectedTab == index, onClick = {
+                          when (index) {
+                              0 -> if (running || workdayActive) { if (!prefs.getBoolean(KEY_TRIP_ELECTRIC, false)) selectedTab = 0 } else profiles.firstOrNull { !it.electric }?.let { selectVehicle(it) }
+                              1 -> if (running || workdayActive) { if (prefs.getBoolean(KEY_TRIP_ELECTRIC, false)) selectedTab = 1 } else profiles.firstOrNull { it.electric }?.let { selectVehicle(it) }
+                              else -> selectedTab = index
+                          }
+                          coroutineScope.launch { drawerState.close() }
+                      }, modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding))
+                  }
               }
           }
       }) {
@@ -822,18 +827,22 @@ private fun RitbonApp() {
                 title = { Text("Rit starten") },
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text("Wil je de route met GPS laten opnemen? Zonder GPS kun je de gereden afstand tijdens de rit zelf invullen.")
+                        Text(if (tripNotificationChoice) "Wil je de route met GPS laten opnemen? Zonder GPS kun je de gereden afstand tijdens de rit zelf invullen."
+                            else "De melding staat uit. Om geen melding te tonen wordt GPS-tracking voor deze rit ook uitgezet; vul de afstand na afloop zelf in.")
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             Column(Modifier.weight(1f)) {
                                 Text("Melding tijdens deze rit", color = Ink, fontWeight = FontWeight.SemiBold)
-                                Text("Toont ritnaam, voertuig en gereden kilometers.", color = Muted, fontSize = 12.sp)
+                                Text("Toont ritnaam, voertuig en gereden kilometers. Nodig voor GPS-tracking op de achtergrond.", color = Muted, fontSize = 12.sp)
                             }
                             Switch(checked = tripNotificationChoice, onCheckedChange = { tripNotificationChoice = it })
                         }
                     }
                 },
-                confirmButton = { TextButton(onClick = { showTripStartDialog = false; beginSelectedTrip(trackGps = true) }) { Text("Start met GPS") } },
-                dismissButton = { TextButton(onClick = { showTripStartDialog = false; beginSelectedTrip(trackGps = false) }) { Text("Start zonder GPS") } }
+                confirmButton = { TextButton(onClick = { showTripStartDialog = false; beginSelectedTrip(trackGps = tripNotificationChoice) }) { Text(if (tripNotificationChoice) "Start met GPS" else "Start zonder melding") } },
+                dismissButton = { TextButton(onClick = {
+                    if (tripNotificationChoice) { showTripStartDialog = false; beginSelectedTrip(trackGps = false) }
+                    else showTripStartDialog = false
+                }) { Text(if (tripNotificationChoice) "Start zonder GPS" else "Annuleren") } }
             )
             if (showFreeFuelDialog) AlertDialog(
                 onDismissRequest = { showFreeFuelDialog = false },
@@ -2496,9 +2505,10 @@ private fun loadMapHtml(context: Context, script: String): String =
     """<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.css"><style>html,body,#map{width:100%;height:100%;margin:0;padding:0;background:#eef3f7}body{overflow:hidden}.maplibregl-ctrl-attrib{font:10px sans-serif}#map-error{display:none;position:absolute;z-index:5;left:12px;right:12px;bottom:12px;background:#fff;padding:10px 12px;border-radius:10px;color:#773d2b;font:13px sans-serif;box-shadow:0 2px 8px #0003}</style></head><body><div id="map"></div><div id="map-error">Kaart niet geladen. Controleer je internetverbinding en probeer opnieuw.</div><script>$script</script><script>(function(){const urls=['https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.js','https://cdn.jsdelivr.net/npm/maplibre-gl@5/dist/maplibre-gl.js'];let i=0;function next(){if(i>=urls.length){document.getElementById('map-error').style.display='block';return}const s=document.createElement('script');s.src=urls[i++];s.onload=()=>{if(window.maplibregl)window.initVlotritMap();else next()};s.onerror=next;document.head.appendChild(s)}next()})();</script></body></html>"""
 
 @Composable
-private fun MapWebView(script: String, modifier: Modifier) {
+private fun MapWebView(script: String, modifier: Modifier, onMapReady: () -> Unit = {}) {
     val context = LocalContext.current
     val html = remember(context, script) { loadMapHtml(context, script) }
+    val latestOnMapReady by rememberUpdatedState(onMapReady)
     AndroidView(modifier = modifier, factory = { ctx ->
         WebView(ctx).apply {
             settings.javaScriptEnabled = true
@@ -2506,6 +2516,9 @@ private fun MapWebView(script: String, modifier: Modifier) {
             settings.cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
             val webViewAgent = android.webkit.WebSettings.getDefaultUserAgent(ctx)
             settings.userAgentString = "$webViewAgent VLOTRIT/1.27 (+https://github.com/Redglowmk3/vlotrit)"
+            addJavascriptInterface(object {
+                @JavascriptInterface fun ready() { latestOnMapReady() }
+            }, "VlotritBridge")
             webViewClient = WebViewClient()
             setBackgroundColor(android.graphics.Color.rgb(238, 243, 247))
         }
@@ -3015,10 +3028,73 @@ private fun RouteMap(route: String, modifier: Modifier = Modifier) {
         """window.initVlotritMap=function(){try{
            const pts=$routeJson,map=new maplibregl.Map({container:'map',style:'https://tiles.openfreemap.org/styles/liberty',center:[5.2913,52.1326],zoom:7,attributionControl:true});
            map.addControl(new maplibregl.NavigationControl({showCompass:false}),'top-right');map.on('error',()=>document.getElementById('map-error').style.display='block');
-           map.on('load',()=>{document.getElementById('map-error').style.display='none';if(pts.length){const coords=pts.map(p=>[p[1],p[0]]);map.addSource('route',{type:'geojson',data:{type:'Feature',properties:{},geometry:{type:'LineString',coordinates:coords}}});map.addLayer({id:'route-casing',type:'line',source:'route',layout:{'line-cap':'round','line-join':'round'},paint:{'line-color':'#ffffff','line-width':9}});map.addLayer({id:'route-line',type:'line',source:'route',layout:{'line-cap':'round','line-join':'round'},paint:{'line-color':'#176b4b','line-width':5}});new maplibregl.Marker({color:'#176b4b'}).setLngLat(coords[0]).setPopup(new maplibregl.Popup().setText('Start')).addTo(map);if(coords.length>1)new maplibregl.Marker({color:'#e4774d'}).setLngLat(coords[coords.length-1]).setPopup(new maplibregl.Popup().setText('Einde')).addTo(map);if(coords.length>1){const bounds=coords.reduce((b,p)=>b.extend(p),new maplibregl.LngLatBounds(coords[0],coords[0]));map.fitBounds(bounds,{padding:30,maxZoom:15})}}});setTimeout(()=>map.resize(),350);setTimeout(()=>{if(!map.isStyleLoaded())document.getElementById('map-error').style.display='block'},15000);
+           map.on('load',()=>{document.getElementById('map-error').style.display='none';if(pts.length){const coords=pts.map(p=>[p[1],p[0]]);map.addSource('route',{type:'geojson',data:{type:'Feature',properties:{},geometry:{type:'LineString',coordinates:coords}}});map.addLayer({id:'route-casing',type:'line',source:'route',layout:{'line-cap':'round','line-join':'round'},paint:{'line-color':'#ffffff','line-width':9}});map.addLayer({id:'route-line',type:'line',source:'route',layout:{'line-cap':'round','line-join':'round'},paint:{'line-color':'#176b4b','line-width':5}});new maplibregl.Marker({color:'#176b4b'}).setLngLat(coords[0]).setPopup(new maplibregl.Popup().setText('Start')).addTo(map);if(coords.length>1)new maplibregl.Marker({color:'#e4774d'}).setLngLat(coords[coords.length-1]).setPopup(new maplibregl.Popup().setText('Einde')).addTo(map);if(coords.length>1){const bounds=coords.reduce((b,p)=>b.extend(p),new maplibregl.LngLatBounds(coords[0],coords[0]));map.fitBounds(bounds,{padding:30,maxZoom:15})}}if(window.VlotritBridge)window.VlotritBridge.ready()});setTimeout(()=>map.resize(),350);setTimeout(()=>{if(!map.isStyleLoaded())document.getElementById('map-error').style.display='block'},15000);
            }catch(e){document.getElementById('map-error').style.display='block'}};"""
     }
-    MapWebView(script, modifier)
+    var mapReady by remember(routeJson) { mutableStateOf(false) }
+    Box(modifier.clip(RoundedCornerShape(12.dp))) {
+        RouteFallbackMap(points, Modifier.fillMaxSize())
+        MapWebView(script, Modifier.fillMaxSize().alpha(if (mapReady) 1f else 0f), onMapReady = { mapReady = true })
+        if (!mapReady) {
+            Surface(Modifier.align(Alignment.TopStart).padding(8.dp), color = Color.White.copy(alpha = .92f), shape = RoundedCornerShape(20.dp)) {
+                Text("GPS-route · ${points.size} punten", Modifier.padding(horizontal = 10.dp, vertical = 6.dp), color = Color(0xFF176B4B), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            }
+            Row(Modifier.align(Alignment.BottomCenter).padding(8.dp), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                Surface(color = Color.White.copy(alpha = .94f), shape = RoundedCornerShape(20.dp)) { Text("START", Modifier.padding(horizontal = 9.dp, vertical = 5.dp), color = Color(0xFF176B4B), fontSize = 9.sp, fontWeight = FontWeight.Bold) }
+                Surface(color = Color.White.copy(alpha = .94f), shape = RoundedCornerShape(20.dp)) { Text("EINDE", Modifier.padding(horizontal = 9.dp, vertical = 5.dp), color = Color(0xFFD66F48), fontSize = 9.sp, fontWeight = FontWeight.Bold) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RouteFallbackMap(points: List<Pair<Double, Double>>, modifier: Modifier = Modifier) {
+    Canvas(modifier.background(Color(0xFFEAF0E8))) {
+        drawRect(Color(0xFFEAF0E8))
+        val w = size.width
+        val h = size.height
+        val road = Color(0xFFFFFFFF)
+        val roadEdge = Color(0xFFD4DDD2)
+        for (i in 0..5) {
+            val y = h * (0.08f + i * 0.19f)
+            val xOffset = if (i % 2 == 0) w * .12f else -w * .08f
+            drawLine(roadEdge, androidx.compose.ui.geometry.Offset(0f, y), androidx.compose.ui.geometry.Offset(w, y + xOffset * .18f), 13.dp.toPx(), cap = StrokeCap.Round)
+            drawLine(road, androidx.compose.ui.geometry.Offset(0f, y), androidx.compose.ui.geometry.Offset(w, y + xOffset * .18f), 8.dp.toPx(), cap = StrokeCap.Round)
+        }
+        for (i in 0..5) {
+            val x = w * (0.04f + i * 0.21f)
+            val yOffset = if (i % 2 == 0) h * .12f else -h * .1f
+            drawLine(roadEdge, androidx.compose.ui.geometry.Offset(x, 0f), androidx.compose.ui.geometry.Offset(x + yOffset * .25f, h), 12.dp.toPx(), cap = StrokeCap.Round)
+            drawLine(road, androidx.compose.ui.geometry.Offset(x, 0f), androidx.compose.ui.geometry.Offset(x + yOffset * .25f, h), 7.dp.toPx(), cap = StrokeCap.Round)
+        }
+        if (points.isEmpty()) return@Canvas
+        val minLat = points.minOf { it.first }; val maxLat = points.maxOf { it.first }
+        val minLon = points.minOf { it.second }; val maxLon = points.maxOf { it.second }
+        val middleLat = ((minLat + maxLat) / 2.0) * Math.PI / 180.0
+        val lonFactor = kotlin.math.cos(middleLat).coerceAtLeast(.1)
+        val spanX = ((maxLon - minLon) * lonFactor).coerceAtLeast(.00005)
+        val spanY = (maxLat - minLat).coerceAtLeast(.00005)
+        val pad = 28.dp.toPx()
+        val scale = minOf((w - 2 * pad) / spanX.toFloat(), (h - 2 * pad) / spanY.toFloat())
+        val routeWidth = (spanX * scale).toFloat()
+        val routeHeight = (spanY * scale).toFloat()
+        val left = (w - routeWidth) / 2f
+        val top = (h - routeHeight) / 2f
+        val coords = points.map { (lat, lon) ->
+            androidx.compose.ui.geometry.Offset(left + ((lon - minLon) * lonFactor).toFloat() * scale, top + ((maxLat - lat).toFloat()) * scale)
+        }
+        if (coords.size > 1) {
+            val path = Path().apply { moveTo(coords.first().x, coords.first().y); coords.drop(1).forEach { lineTo(it.x, it.y) } }
+            drawPath(path, Color.White, style = Stroke(11.dp.toPx(), cap = StrokeCap.Round, join = androidx.compose.ui.graphics.StrokeJoin.Round))
+            drawPath(path, Color(0xFF176B4B), style = Stroke(6.dp.toPx(), cap = StrokeCap.Round, join = androidx.compose.ui.graphics.StrokeJoin.Round))
+        }
+        drawCircle(Color.White, 10.dp.toPx(), coords.first())
+        drawCircle(Color(0xFF176B4B), 7.dp.toPx(), coords.first())
+        if (coords.size > 1) {
+            drawCircle(Color.White, 10.dp.toPx(), coords.last())
+            drawCircle(Color(0xFFE4774D), 7.dp.toPx(), coords.last())
+        }
+    }
 }
 
 private fun routeEndpoints(route: String): Pair<Pair<Double, Double>?, Pair<Double, Double>?> {
