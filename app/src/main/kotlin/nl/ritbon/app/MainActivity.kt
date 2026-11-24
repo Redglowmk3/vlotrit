@@ -11,14 +11,28 @@ import android.content.pm.PackageManager
 import android.location.Geocoder
 import android.location.Location
 import android.location.LocationManager
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioTrack
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.view.OrientationEventListener
 import android.provider.Settings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.text.Html
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -54,6 +68,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.delay
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -432,6 +448,23 @@ private fun RitbonApp() {
     var latestRelease by remember { mutableStateOf<AppRelease?>(null) }
     var availableRelease by remember { mutableStateOf<AppRelease?>(null) }
     var checkingUpdates by remember { mutableStateOf(false) }
+    var logoConfettiBurst by remember { mutableIntStateOf(0) }
+    var showLogoConfetti by remember { mutableStateOf(false) }
+    var showFreeFuelDialog by remember { mutableStateOf(false) }
+    var showGoodNightDialog by remember { mutableStateOf(false) }
+    var showUpsideDownDialog by remember { mutableStateOf(false) }
+    var upsideDownShown by remember { mutableStateOf(false) }
+    var selectedShakeTrip by remember { mutableStateOf<TripRecord?>(null) }
+    var noShakeTrips by remember { mutableStateOf(false) }
+    val latestHistory by rememberUpdatedState(history)
+    val openingGreeting = remember {
+        val hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
+        when {
+            hour in listOf(23, 0, 1, 2, 3, 4) -> "Nog laat onderweg? Houd je ogen op de weg."
+            hour in 5..6 -> "Vroeg uit de veren! De koffie staat hopelijk al klaar."
+            else -> ""
+        }
+    }
     val coroutineScope = rememberCoroutineScope()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
 
@@ -449,6 +482,56 @@ private fun RitbonApp() {
         } finally {
             prefs.edit().putLong("updates_last_check", System.currentTimeMillis()).apply()
             checkingUpdates = false
+        }
+    }
+
+    LaunchedEffect(logoConfettiBurst) {
+        if (logoConfettiBurst > 0) {
+            showLogoConfetti = true
+            playEasterEggSound()
+            delay(1800)
+            showLogoConfetti = false
+        }
+    }
+
+    DisposableEffect(context, selectedTab, running, workdayActive) {
+        if (selectedTab != 0 || running || workdayActive) {
+            onDispose { }
+        } else {
+            val manager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+            val sensor = manager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+            var lastShakeAt = 0L
+            val listener = object : SensorEventListener {
+                override fun onSensorChanged(event: SensorEvent) {
+                    val x = event.values[0]; val y = event.values[1]; val z = event.values[2]
+                    val magnitude = kotlin.math.sqrt(x * x + y * y + z * z)
+                    val now = System.currentTimeMillis()
+                    if (magnitude > 20f && now - lastShakeAt > 1600L) {
+                        lastShakeAt = now
+                        val trip = latestHistory.randomOrNull()
+                        if (trip == null) noShakeTrips = true else selectedShakeTrip = trip
+                    }
+                }
+                override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+            }
+            if (sensor != null) manager.registerListener(listener, sensor, SensorManager.SENSOR_DELAY_UI)
+            onDispose { manager.unregisterListener(listener) }
+        }
+    }
+
+    DisposableEffect(context, selectedTab) {
+        if (selectedTab != 0) onDispose { }
+        else {
+            val listener = object : OrientationEventListener(context, SensorManager.SENSOR_DELAY_NORMAL) {
+                override fun onOrientationChanged(orientation: Int) {
+                    if (!upsideDownShown && orientation in 165..195) {
+                        upsideDownShown = true
+                        showUpsideDownDialog = true
+                    }
+                }
+            }
+            if (listener.canDetectOrientation()) listener.enable()
+            onDispose { listener.disable() }
         }
     }
 
@@ -602,6 +685,8 @@ private fun RitbonApp() {
                 .putLong(KEY_STOPPED_AT, stoppedAt).apply()
             context.stopService(Intent(context, RouteTrackingService::class.java)); running = false
             startOdo = endOdo.formatInput(); info = "Eindstand ${endOdo.formatNl()} km opgeslagen als je volgende beginstand."
+            val localStop = java.util.Calendar.getInstance().apply { timeInMillis = stoppedAt }
+            if ((localStop.get(java.util.Calendar.HOUR_OF_DAY) == 23 && localStop.get(java.util.Calendar.MINUTE) >= 30) || localStop.get(java.util.Calendar.HOUR_OF_DAY) in 0..4) showGoodNightDialog = true
         }
     }
 
@@ -630,7 +715,15 @@ private fun RitbonApp() {
                     listOf(.28f, .5f, .72f).forEach { y -> drawLine(Forest, androidx.compose.ui.geometry.Offset(left, size.height * y), androidx.compose.ui.geometry.Offset(right, size.height * y), strokeWidth = stroke, cap = StrokeCap.Round) }
                 }
                 Row(Modifier.align(Alignment.Center), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                    Image(painter = painterResource(R.drawable.vlotrit_logo), contentDescription = "VLOTRIT-logo", modifier = Modifier.size(39.dp), contentScale = ContentScale.Crop)
+                    Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                        Image(painter = painterResource(R.drawable.vlotrit_logo), contentDescription = "VLOTRIT-logo", modifier = Modifier.size(39.dp), contentScale = ContentScale.Crop)
+                        if (showLogoConfetti) {
+                            Text("€", Modifier.align(Alignment.TopStart).offset((-5).dp, (-7).dp), color = Forest, fontWeight = FontWeight.ExtraBold, fontSize = 15.sp)
+                            Text("⛽", Modifier.align(Alignment.TopEnd).offset(4.dp, (-8).dp), fontSize = 13.sp)
+                            Text("€", Modifier.align(Alignment.BottomEnd).offset(3.dp, 5.dp), color = Forest, fontWeight = FontWeight.ExtraBold, fontSize = 14.sp)
+                            Text("⛽", Modifier.align(Alignment.BottomStart).offset((-5).dp, 4.dp), fontSize = 12.sp)
+                        }
+                    }
                     Text("VLOTRIT", fontSize = 19.sp, fontWeight = FontWeight.ExtraBold, color = Ink, letterSpacing = 1.1.sp)
                 }
                 val isActive = workdayActive || running
@@ -642,8 +735,16 @@ private fun RitbonApp() {
                 }
             }
             if (selectedTab !in 7..10) VehicleProfilesCard(profiles, selectedVehicle.id, enabled = !running && !workdayActive,
-                onSelect = { selectVehicle(it) })
+                onSelect = { selectVehicle(it) }, onPlateEasterEgg = { logoConfettiBurst++ }, onHornEasterEgg = { playEasterEggSound(horn = true) })
             HeroBanner(selectedTab, running, gpsError, workdayActive, onTripAction)
+            if (selectedTab == 0 && openingGreeting.isNotBlank()) {
+                Card(shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = BlueTint)) {
+                    Row(Modifier.fillMaxWidth().padding(13.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(if (openingGreeting.startsWith("Nog laat")) "🦉" else "☕", fontSize = 22.sp)
+                        Text(openingGreeting, color = Ink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
             if (availableRelease != null) {
                 Card(Modifier.fillMaxWidth().clickable { selectedTab = 10 }, shape = RoundedCornerShape(16.dp),
                     colors = CardDefaults.cardColors(containerColor = BlueTint)) {
@@ -651,6 +752,40 @@ private fun RitbonApp() {
                         Modifier.padding(horizontal = 15.dp, vertical = 12.dp), color = Ink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                 }
             }
+            if (showFreeFuelDialog) AlertDialog(
+                onDismissRequest = { showFreeFuelDialog = false },
+                title = { Text("Gratis tankbeurt!") },
+                text = { Text("Gefeliciteerd, je hebt een pomphouder gevonden die nog in 1995 leeft!") },
+                confirmButton = { TextButton(onClick = { showFreeFuelDialog = false }) { Text("Haha") } }
+            )
+            if (showGoodNightDialog) AlertDialog(
+                onDismissRequest = { showGoodNightDialog = false },
+                title = { Text("Welterusten") },
+                text = { Text("Rit veilig opgeslagen. Welterusten voor straks!") },
+                confirmButton = { TextButton(onClick = { showGoodNightDialog = false }) { Text("Dank je") } }
+            )
+            if (showUpsideDownDialog) AlertDialog(
+                onDismissRequest = { showUpsideDownDialog = false },
+                title = { Text("VLOTRIT") },
+                text = { Text("Alles goed daar? De auto staat hopelijk nog wel op vier wielen.") },
+                confirmButton = { TextButton(onClick = { showUpsideDownDialog = false }) { Text("Ja hoor") } }
+            )
+            selectedShakeTrip?.let { picked -> AlertDialog(
+                onDismissRequest = { selectedShakeTrip = null },
+                title = { Text("Deze rit kiest vandaag voor jou.") },
+                text = { Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(picked.name.ifBlank { picked.vehicleName.ifBlank { "Je rit" } })
+                    Text("${picked.distanceKm.formatNl()} km · ${picked.cost.euro()}", color = Muted)
+                    if (picked.route.isNotBlank()) RouteMap(picked.route, Modifier.fillMaxWidth().height(150.dp))
+                } },
+                confirmButton = { TextButton(onClick = { selectedHistoryId = picked.id; selectedTab = 2; selectedShakeTrip = null }) { Text("Bekijk rit") } },
+                dismissButton = { TextButton(onClick = { selectedShakeTrip = null }) { Text("Sluiten") } }
+            ) }
+            if (noShakeTrips) AlertDialog(
+                onDismissRequest = { noShakeTrips = false }, title = { Text("Deze rit kiest vandaag voor jou.") },
+                text = { Text("Sla eerst een rit op, dan kan VLOTRIT er willekeurig een uitlichten.") },
+                confirmButton = { TextButton(onClick = { noShakeTrips = false }) { Text("Begrepen") } }
+            )
             if (selectedTab == 2) {
                 TripHistory(context, prefs, history, selectedHistoryId, selectedVehicle,
                     onSelect = { selectedHistoryId = it }, onTripsChanged = { history = it },
@@ -775,6 +910,7 @@ private fun RitbonApp() {
                                 value.replace(',', '.').toFloatOrNull()?.takeIf { it >= 0f }?.let { number ->
                                     updateSelectedVehicle(selectedVehicle.copy(price = number))
                                     prefs.edit().putFloat(if (electricTab) KEY_ELECTRIC_PRICE else KEY_PRICE, number).apply()
+                                    if (!electricTab && selectedVehicle.fuelType == "E10" && number == 0f) showFreeFuelDialog = true
                                 }
                             },
                             if (electricTab) "€/kWh" else "€/L", Modifier.weight(1f), enabled = !running)
@@ -998,19 +1134,58 @@ private fun VehicleManagerTab(
 
 @Composable
 private fun VehicleProfilesCard(
-    profiles: List<VehicleProfile>, selectedId: String, enabled: Boolean, onSelect: (VehicleProfile) -> Unit
+    profiles: List<VehicleProfile>, selectedId: String, enabled: Boolean, onSelect: (VehicleProfile) -> Unit,
+    onPlateEasterEgg: () -> Unit, onHornEasterEgg: () -> Unit
 ) {
     var menuOpen by remember { mutableStateOf(false) }
+    var headlightFlash by remember { mutableStateOf(false) }
+    var headlightTaps by remember { mutableIntStateOf(0) }
+    var lastHeadlightTap by remember { mutableLongStateOf(0L) }
+    val scope = rememberCoroutineScope()
     val active = profiles.firstOrNull { it.id == selectedId } ?: profiles.first()
     Card(shape = RoundedCornerShape(23.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(2.dp)) {
         Box {
             Row(Modifier.fillMaxWidth().clickable(enabled = enabled) { menuOpen = true }.padding(15.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                VehicleSilhouette(Modifier.width(104.dp).height(60.dp))
+                Box(Modifier.width(104.dp).height(60.dp)) {
+                    VehicleSilhouette(Modifier.fillMaxSize(), headlightFlash)
+                    Box(Modifier.fillMaxSize().pointerInput(headlightFlash) {
+                        detectTapGestures { tap ->
+                            val atHeadlight = tap.x > size.width * .84f && tap.y in (size.height * .43f)..(size.height * .70f)
+                            if (atHeadlight) {
+                                val now = System.currentTimeMillis()
+                                headlightTaps = if (now - lastHeadlightTap < 1400L) headlightTaps + 1 else 1
+                                lastHeadlightTap = now
+                                if (headlightTaps >= 3) {
+                                    headlightTaps = 0
+                                    headlightFlash = true
+                                    onHornEasterEgg()
+                                    scope.launch { delay(450); headlightFlash = false }
+                                }
+                            }
+                        }
+                    })
+                }
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(active.name, color = Ink, fontSize = 17.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 20.sp)
                     Text("${active.consumption.formatNl()} ${if (active.electric) "kWh/100 km" else "L/100 km"}", color = Muted, fontSize = 11.sp)
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Surface(color = BlueTint, shape = RoundedCornerShape(7.dp)) {
+                        Surface(color = BlueTint, shape = RoundedCornerShape(7.dp), modifier = Modifier.pointerInput(active.licensePlate) {
+                            if (active.licensePlate.isNotBlank()) awaitEachGesture {
+                                val down = awaitFirstDown(requireUnconsumed = false)
+                                val completed = withTimeoutOrNull<Boolean>(3000L) {
+                                    while (true) {
+                                        val event = awaitPointerEvent()
+                                        val change = event.changes.firstOrNull { it.id == down.id } ?: continue
+                                        if (!change.pressed) return@withTimeoutOrNull false
+                                        val dx = change.position.x - down.position.x
+                                        val dy = change.position.y - down.position.y
+                                        if (dx * dx + dy * dy > viewConfiguration.touchSlop * viewConfiguration.touchSlop) return@withTimeoutOrNull false
+                                    }
+                                    false
+                                }
+                                if (completed == null) onPlateEasterEgg()
+                            }
+                        }) {
                             Text(active.licensePlate.ifBlank { "Kenteken toevoegen" }, modifier = Modifier.padding(horizontal = 7.dp, vertical = 5.dp), color = Ink, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                         }
                         Surface(color = if (active.electric) Color(0xFFE5F4FB) else Color(0xFFE2F7E8), shape = RoundedCornerShape(7.dp)) {
@@ -1031,7 +1206,7 @@ private fun VehicleProfilesCard(
 }
 
 @Composable
-private fun VehicleSilhouette(modifier: Modifier = Modifier) {
+private fun VehicleSilhouette(modifier: Modifier = Modifier, headlightFlash: Boolean = false) {
     Canvas(modifier) {
         val car = Path().apply {
             moveTo(size.width * .06f, size.height * .69f)
@@ -1056,6 +1231,7 @@ private fun VehicleSilhouette(modifier: Modifier = Modifier) {
             close()
         }
         drawPath(windows, BlueTint)
+        drawCircle(if (headlightFlash) Color(0xFFFFF176) else Color(0xFFB8DFFF), size.height * .055f, androidx.compose.ui.geometry.Offset(size.width * .95f, size.height * .59f))
         listOf(.28f, .76f).forEach { x ->
             drawCircle(Ink, size.height * .19f, androidx.compose.ui.geometry.Offset(size.width * x, size.height * .76f))
             drawCircle(Color(0xFFEAF0F7), size.height * .09f, androidx.compose.ui.geometry.Offset(size.width * x, size.height * .76f))
@@ -2061,6 +2237,34 @@ private fun openStationNavigation(context: Context, station: NearbyStation) {
 private fun openExternal(context: Context, value: String) {
     val url = if (value.startsWith("http://") || value.startsWith("https://")) value else "https://$value"
     try { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) } catch (_: Exception) { }
+}
+
+private fun playEasterEggSound(horn: Boolean = false) {
+    val sampleRate = 22050
+    val durationMs = if (horn) 420 else 560
+    val samples = ShortArray(sampleRate * durationMs / 1000)
+    var phase = 0.0
+    samples.indices.forEach { index ->
+        val progress = index.toDouble() / samples.size
+        val time = index.toDouble() / sampleRate
+        val frequency = if (horn) if (progress < .48) 520.0 else 660.0 else 82.0 + 155.0 * progress
+        phase += 2.0 * Math.PI * frequency / sampleRate
+        val envelope = minOf(1.0, progress * 18.0, (1.0 - progress) * 14.0).coerceAtLeast(0.0)
+        val pulse = if (horn) 1.0 else .52 + .48 * kotlin.math.abs(kotlin.math.sin(2.0 * Math.PI * 19.0 * time))
+        val wave = if (horn) kotlin.math.sin(phase) else kotlin.math.sin(phase) + .34 * kotlin.math.sin(phase * 2.0) + .16 * kotlin.math.sin(phase * 3.0)
+        samples[index] = (wave * pulse * envelope * 7500.0).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
+    }
+    val track = runCatching {
+        AudioTrack.Builder()
+            .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION).setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build())
+            .setAudioFormat(AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT).setSampleRate(sampleRate).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
+            .setBufferSizeInBytes(samples.size * 2)
+            .setTransferMode(AudioTrack.MODE_STATIC)
+            .build()
+    }.getOrNull() ?: return
+    if (track.write(samples, 0, samples.size) < 0) { track.release(); return }
+    track.play()
+    Handler(Looper.getMainLooper()).postDelayed({ runCatching { track.stop() }; track.release() }, durationMs.toLong() + 150L)
 }
 
 @Composable
