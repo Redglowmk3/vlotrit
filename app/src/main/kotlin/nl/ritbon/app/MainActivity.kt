@@ -429,8 +429,28 @@ private fun RitbonApp() {
     var gpsError by remember { mutableStateOf(prefs.getString(KEY_GPS_ERROR, "").orEmpty()) }
     var priceInfo by remember { mutableStateOf("E10 prijs ophalen…") }
     var info by remember { mutableStateOf("") }
+    var latestRelease by remember { mutableStateOf<AppRelease?>(null) }
+    var availableRelease by remember { mutableStateOf<AppRelease?>(null) }
+    var checkingUpdates by remember { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
+
+    suspend fun checkForAppUpdate() {
+        if (checkingUpdates) return
+        checkingUpdates = true
+        try {
+            val currentVersion = context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "0"
+            val latest = withContext(Dispatchers.IO) { fetchLatestRelease(UPDATE_REPOSITORY, currentVersion) }
+            latestRelease = latest
+            availableRelease = latest.takeIf { compareVersionNames(it.versionName, currentVersion) > 0 }
+        } catch (_: Exception) {
+            latestRelease = null
+            availableRelease = null
+        } finally {
+            prefs.edit().putLong("updates_last_check", System.currentTimeMillis()).apply()
+            checkingUpdates = false
+        }
+    }
 
     fun selectVehicle(profile: VehicleProfile, navigateToTripTab: Boolean = true) {
         selectedVehicleId = profile.id
@@ -489,6 +509,7 @@ private fun RitbonApp() {
         if (prefs.getString(KEY_VEHICLES, null) == null) writeVehicleProfiles(prefs, profiles)
         prefs.edit().putString(KEY_SELECTED_VEHICLE, selectedVehicleId).apply()
     }
+    LaunchedEffect(Unit) { checkForAppUpdate() }
 
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
         val ok = grants[Manifest.permission.ACCESS_FINE_LOCATION] == true || grants[Manifest.permission.ACCESS_COARSE_LOCATION] == true
@@ -623,7 +644,13 @@ private fun RitbonApp() {
             if (selectedTab !in 7..10) VehicleProfilesCard(profiles, selectedVehicle.id, enabled = !running && !workdayActive,
                 onSelect = { selectVehicle(it) })
             HeroBanner(selectedTab, running, gpsError, workdayActive, onTripAction)
-            UpdateCard(context, prefs)
+            if (availableRelease != null) {
+                Card(Modifier.fillMaxWidth().clickable { selectedTab = 10 }, shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = BlueTint)) {
+                    Text("Er is een nieuwe update beschikbaar. Werk VLOTRIT bij via het kopje Info om de nieuwe versie te gebruiken.",
+                        Modifier.padding(horizontal = 15.dp, vertical = 12.dp), color = Ink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
             if (selectedTab == 2) {
                 TripHistory(context, prefs, history, selectedHistoryId, selectedVehicle,
                     onSelect = { selectedHistoryId = it }, onTripsChanged = { history = it },
@@ -701,7 +728,7 @@ private fun RitbonApp() {
                     onSave = ::saveVehicleProfile,
                     onDelete = ::deleteVehicleProfile)
             } else if (selectedTab == 10) {
-                AppInfoTab(context)
+                AppInfoTab(context, latestRelease, availableRelease, checkingUpdates) { coroutineScope.launch { checkForAppUpdate() } }
             } else {
             val electricTab = selectedTab == 1
             val activeElectric = prefs.getBoolean(KEY_TRIP_ELECTRIC, false)
@@ -1111,54 +1138,26 @@ private fun BusinessWorkdayCard(
 private data class AppRelease(val versionName: String, val apkUrl: String, val notes: String)
 
 @Composable
-private fun UpdateCard(context: Context, prefs: android.content.SharedPreferences) {
-    var release by remember { mutableStateOf<AppRelease?>(null) }
-    var checking by remember { mutableStateOf(false) }
+private fun UpdateCard(context: Context, latestRelease: AppRelease?, availableRelease: AppRelease?, checking: Boolean, onCheck: () -> Unit) {
     var downloading by remember { mutableStateOf(false) }
-    var status by remember { mutableStateOf("Updates worden automatisch gecontroleerd.") }
+    var installStatus by remember { mutableStateOf("") }
     val scope = rememberCoroutineScope()
-
-    suspend fun checkForUpdate() {
-        if (UPDATE_REPOSITORY.startsWith("OWNER/")) {
-            status = "Updatekanaal is nog niet ingesteld."
-            return
-        }
-        checking = true
-        try {
-            val currentVersion = context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "0"
-            val latest = withContext(Dispatchers.IO) { fetchLatestRelease(UPDATE_REPOSITORY) }
-            if (compareVersionNames(latest.versionName, currentVersion) > 0) {
-                release = latest
-                status = "Versie ${latest.versionName} is beschikbaar."
-            } else {
-                release = null
-                status = "Je gebruikt de nieuwste versie ($currentVersion)."
-            }
-        } catch (e: Exception) {
-            status = e.message?.takeIf { it.isNotBlank() } ?: "Updatecontrole lukte niet. Controleer je internetverbinding."
-        } finally {
-            prefs.edit().putLong("updates_last_check", System.currentTimeMillis()).apply()
-            checking = false
-        }
-    }
-
-    LaunchedEffect(UPDATE_REPOSITORY) {
-        checkForUpdate()
-    }
 
     Card(shape = RoundedCornerShape(17.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 15.dp, vertical = 11.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text("App-updates", color = Ink, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                    Text(status, color = if (release != null) Forest else Muted, fontSize = 11.sp)
+                    Text("App updaten", color = Ink, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    Text(if (checking) "Controleren op nieuwe versies…" else availableRelease?.let { "Versie ${it.versionName} is beschikbaar." } ?: "Je gebruikt de nieuwste versie.",
+                        color = if (availableRelease != null) Forest else Muted, fontSize = 11.sp)
                 }
-                TextButton(enabled = !checking, onClick = { scope.launch { checkForUpdate() } }) {
+                TextButton(enabled = !checking, onClick = onCheck) {
                     Text(if (checking) "Controleren…" else "Controleer", color = Forest)
                 }
             }
-            release?.let { available ->
-                if (available.notes.isNotBlank()) Text(available.notes.take(240), color = Muted, fontSize = 11.sp)
+            Text("Sinds je laatste update", color = Ink, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            Text(latestRelease?.notes?.takeIf { it.isNotBlank() } ?: "Geen wijzigingsnotities beschikbaar.", color = Muted, fontSize = 11.sp, lineHeight = 16.sp, maxLines = 5)
+            availableRelease?.let { available ->
                 Button(enabled = !downloading, onClick = {
                     scope.launch {
                         downloading = true
@@ -1166,24 +1165,25 @@ private fun UpdateCard(context: Context, prefs: android.content.SharedPreference
                             val file = withContext(Dispatchers.IO) { downloadUpdate(context, available) }
                             if (!context.packageManager.canRequestPackageInstalls()) {
                                 context.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${context.packageName}")))
-                                status = "Sta installatie vanuit VLOTRIT toe en tik daarna opnieuw op installeren."
+                                installStatus = "Sta installatie vanuit VLOTRIT toe en tik daarna opnieuw op installeren."
                             } else {
                                 withContext(Dispatchers.IO) { installUpdate(context, file) }
-                                status = "Bevestig de update in het Android-installatievenster."
+                                installStatus = "Bevestig de update in het Android-installatievenster."
                             }
                         } catch (e: Exception) {
-                            status = e.message ?: "Downloaden of installeren is mislukt."
+                            installStatus = e.message ?: "Downloaden of installeren is mislukt."
                         } finally { downloading = false }
                     }
                 }, modifier = Modifier.fillMaxWidth()) {
-                    Text(if (downloading) "Update downloaden…" else "Download versie ${available.versionName}")
+                    Text(if (downloading) "Update downloaden…" else "Download en installeer ${available.versionName}")
                 }
             }
+            if (installStatus.isNotBlank()) Text(installStatus, color = Muted, fontSize = 11.sp)
         }
     }
 }
 
-private fun fetchLatestRelease(repository: String): AppRelease {
+private fun fetchLatestRelease(repository: String, sinceVersion: String? = null): AppRelease {
     require(Regex("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$").matches(repository)) { "Updatekanaal is ongeldig." }
     val connection = (URL("https://api.github.com/repos/$repository/releases/latest").openConnection() as HttpURLConnection).apply {
         connectTimeout = 12000; readTimeout = 12000
@@ -1200,8 +1200,35 @@ private fun fetchLatestRelease(repository: String): AppRelease {
         val apk = (0 until assets.length()).mapNotNull { assets.optJSONObject(it) }
             .firstOrNull { it.optString("name") == "Vlotrit.apk" }
             ?: error("Voeg Vlotrit.apk toe aan de GitHub-release.")
-        AppRelease(version, apk.getString("browser_download_url"), json.optString("body").trim())
+        val releaseBody = json.optString("body").trim()
+        val isOnlyChangelogLink = releaseBody.contains("Full Changelog", ignoreCase = true)
+        val notes = if (releaseBody.isBlank() || isOnlyChangelogLink) {
+            fetchReleaseChanges(repository, version, sinceVersion) ?: "Bekijk de wijzigingen van versie $version op GitHub."
+        } else releaseBody
+        AppRelease(version, apk.getString("browser_download_url"), notes)
     } finally { connection.disconnect() }
+}
+
+private fun fetchReleaseChanges(repository: String, version: String, sinceVersion: String?): String? {
+    val base = sinceVersion?.takeIf { compareVersionNames(it, version) < 0 } ?: run {
+        val parts = version.split('.').mapNotNull { it.toIntOrNull() }.toMutableList()
+        if (parts.isEmpty() || parts.last() <= 0) return null
+        parts[parts.lastIndex] = parts.last() - 1
+        parts.joinToString(".")
+    }
+    val connection = (URL("https://api.github.com/repos/$repository/compare/v$base...v$version").openConnection() as HttpURLConnection).apply {
+        connectTimeout = 10000; readTimeout = 10000
+        setRequestProperty("Accept", "application/vnd.github+json")
+        setRequestProperty("User-Agent", "VLOTRIT Android updater")
+    }
+    return try {
+        if (connection.responseCode !in 200..299) return null
+        val commits = JSONObject(connection.inputStream.bufferedReader().use { it.readText() }).optJSONArray("commits") ?: return null
+        (0 until commits.length()).mapNotNull { index ->
+            commits.optJSONObject(index)?.optJSONObject("commit")?.optString("message")
+                ?.lineSequence()?.firstOrNull()?.takeIf { it.isNotBlank() }
+        }.distinct().joinToString("\n").take(500).ifBlank { null }
+    } catch (_: Exception) { null } finally { connection.disconnect() }
 }
 
 private fun compareVersionNames(left: String, right: String): Int {
@@ -1449,6 +1476,9 @@ private fun InsightMetric(label: String, value: String, modifier: Modifier) {
 @Composable
 private fun ChargeSessionsTab(prefs: android.content.SharedPreferences, vehicle: VehicleProfile) {
     var sessions by remember { mutableStateOf(readChargeSessions(prefs)) }
+    var selectionMode by remember { mutableStateOf(false) }
+    var selectedSessionIds by remember { mutableStateOf(setOf<Long>()) }
+    var confirmDelete by remember { mutableStateOf(false) }
     var kwh by remember { mutableStateOf("") }
     var price by remember(vehicle.id) { mutableStateOf((if (vehicle.electric) vehicle.price else 0.30f).formatPrice()) }
     var location by remember { mutableStateOf("") }
@@ -1490,24 +1520,53 @@ private fun ChargeSessionsTab(prefs: android.content.SharedPreferences, vehicle:
         }
         Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
             Column(Modifier.fillMaxWidth().padding(17.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
-                Text("Laadgeschiedenis · ${vehicle.name}", color = Ink, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("Laadgeschiedenis · ${vehicle.name}", color = Ink, fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                    TextButton(onClick = { selectionMode = !selectionMode; selectedSessionIds = emptySet() }) {
+                        Text(if (selectionMode) "Annuleren" else "Selecteer", color = Forest)
+                    }
+                }
                 Text("${totalKwh.formatNl()} kWh geladen  ·  ${totalCost.euro()} totaal", color = Forest, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                 val visible = sessions.filter { it.vehicleId == vehicle.id }
+                if (selectionMode) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("${selectedSessionIds.size} geselecteerd", color = Muted, fontSize = 12.sp)
+                    Button(onClick = { confirmDelete = true }, enabled = selectedSessionIds.isNotEmpty()) { Text("Verwijder selectie") }
+                }
                 if (visible.isEmpty()) Text("Je opgeslagen laadbeurten verschijnen hier.", color = Muted, fontSize = 12.sp)
                 visible.forEach { session ->
                     HorizontalDivider(color = Color(0xFFEAF0F6))
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Row(Modifier.fillMaxWidth().clickable(enabled = selectionMode) {
+                        selectedSessionIds = if (session.id in selectedSessionIds) selectedSessionIds - session.id else selectedSessionIds + session.id
+                    }, horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        if (selectionMode) Checkbox(checked = session.id in selectedSessionIds, onCheckedChange = { checked ->
+                            selectedSessionIds = if (checked) selectedSessionIds + session.id else selectedSessionIds - session.id
+                        })
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                             Text("${session.kwh.formatNl()} kWh  ·  ${session.cost.euro()}", color = Ink, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                             Text("${Date(session.timestamp).dateTime()}${if (session.location.isNotBlank()) "  ·  ${session.location}" else ""}", color = Muted, fontSize = 10.sp)
                             Text("${session.pricePerKwh.euro()} per kWh", color = Muted, fontSize = 11.sp)
                         }
-                        TextButton(onClick = { sessions = sessions.filterNot { it.id == session.id }; writeChargeSessions(prefs, sessions) }) { Text("Verwijder", color = Color(0xFFB14F45), fontSize = 11.sp) }
+                        TextButton(onClick = {
+                            sessions = sessions.filterNot { it.id == session.id }
+                            selectedSessionIds = selectedSessionIds - session.id
+                            writeChargeSessions(prefs, sessions)
+                        }) { Text("Verwijder", color = Color(0xFFB14F45), fontSize = 11.sp) }
                     }
                 }
             }
         }
     }
+    if (confirmDelete) AlertDialog(
+        onDismissRequest = { confirmDelete = false },
+        title = { Text("Laadbeurten verwijderen?") },
+        text = { Text("${selectedSessionIds.size} geselecteerde laadbeurt(en) worden definitief verwijderd.") },
+        confirmButton = { TextButton(onClick = {
+            sessions = sessions.filterNot { it.id in selectedSessionIds }
+            writeChargeSessions(prefs, sessions)
+            selectedSessionIds = emptySet(); selectionMode = false; confirmDelete = false
+        }) { Text("Verwijderen", color = Color(0xFFB14F45)) } },
+        dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Annuleren") } }
+    )
 }
 
 @Composable
@@ -1617,7 +1676,7 @@ private fun MaintenanceTab(
 }
 
 @Composable
-private fun AppInfoTab(context: Context) {
+private fun AppInfoTab(context: Context, latestRelease: AppRelease?, availableRelease: AppRelease?, checkingUpdates: Boolean, onCheckUpdates: () -> Unit) {
     val packageInfo = remember {
         runCatching { context.packageManager.getPackageInfo(context.packageName, 0) }.getOrNull()
     }
@@ -1628,6 +1687,7 @@ private fun AppInfoTab(context: Context) {
     } ?: "Onbekend"
 
     Column(verticalArrangement = Arrangement.spacedBy(13.dp)) {
+        UpdateCard(context, latestRelease, availableRelease, checkingUpdates, onCheckUpdates)
         Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Color.White),
             elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
             Row(Modifier.fillMaxWidth().padding(18.dp), verticalAlignment = Alignment.CenterVertically,
@@ -1647,7 +1707,7 @@ private fun AppInfoTab(context: Context) {
                 HistoryDetailLine("Versie", versionName)
                 HistoryDetailLine("Buildnummer", versionCode)
                 HistoryDetailLine("App-id", context.packageName)
-                Text("Updates zijn beschikbaar via de updater bovenaan het scherm. Nieuwe versies worden als GitHub-release gepubliceerd.", color = Muted, fontSize = 12.sp, lineHeight = 17.sp)
+                Text("Nieuwe updates vind je bovenaan dit Info-tabblad.", color = Muted, fontSize = 12.sp, lineHeight = 17.sp)
                 TextButton(onClick = { openExternal(context, "https://github.com/Redglowmk3/vlotrit/releases/latest") }) {
                     Text("Bekijk releases op GitHub ↗", color = Forest, fontWeight = FontWeight.Bold)
                 }
@@ -1657,11 +1717,11 @@ private fun AppInfoTab(context: Context) {
             elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
             Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
                 Text("Kaart en prijzen", color = Ink, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                Text("Kaartgegevens © OpenStreetMap-bijdragers. Pompprijzen zijn indicatief en kunnen afwijken van de prijs aan de pomp.", color = Muted, fontSize = 12.sp, lineHeight = 17.sp)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = { openExternal(context, "https://openfreemap.org/") }) { Text("OpenFreeMap", color = Forest) }
-                    TextButton(onClick = { openExternal(context, "https://www.openstreetmap.org/copyright") }) { Text("OpenStreetMap", color = Forest) }
-                    TextButton(onClick = { openExternal(context, "https://hoeveelbenzine.nl/methodologie") }) { Text("Prijsbron", color = Forest) }
+                Text("Kaart via OpenFreeMap met OpenStreetMap-gegevens. Pompprijzen zijn indicatief en kunnen afwijken van de prijs aan de pomp.", color = Muted, fontSize = 12.sp, lineHeight = 17.sp)
+                Column(verticalArrangement = Arrangement.spacedBy(0.dp)) {
+                    TextButton(onClick = { openExternal(context, "https://openfreemap.org/") }, modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(horizontal = 0.dp)) { Text("OpenFreeMap", color = Forest) }
+                    TextButton(onClick = { openExternal(context, "https://www.openstreetmap.org/copyright") }, modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(horizontal = 0.dp)) { Text("OpenStreetMap", color = Forest) }
+                    TextButton(onClick = { openExternal(context, "https://hoeveelbenzine.nl/methodologie") }, modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(horizontal = 0.dp)) { Text("Prijsbron: Hoeveelbenzine.nl", color = Forest) }
                 }
             }
         }
