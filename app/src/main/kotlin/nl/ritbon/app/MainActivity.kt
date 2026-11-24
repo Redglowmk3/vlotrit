@@ -540,7 +540,8 @@ private fun RitbonApp() {
           ModalDrawerSheet {
               Text("VLOTRIT", modifier = Modifier.padding(horizontal = 22.dp, vertical = 22.dp), color = Ink, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
               HorizontalDivider()
-              listOf("Brandstof", "Elektrisch", "Ritten", "Planner", "Zakelijk", "Inzicht", "Laadbeurten", "Stations", "Info", "Onderhoud", "Voertuigen").forEachIndexed { index, label ->
+              listOf("Brandstof", "Elektrisch", "Ritten", "Planner", "Zakelijk", "Inzicht", "Laadbeurten", "Stations", "Onderhoud", "Voertuigen", "Info").forEachIndexed { index, label ->
+                  if (index == 10) HorizontalDivider(Modifier.padding(vertical = 8.dp))
                   NavigationDrawerItem(label = { Text(label) }, selected = selectedTab == index, onClick = {
                       when (index) {
                           0 -> if (running || workdayActive) { if (!prefs.getBoolean(KEY_TRIP_ELECTRIC, false)) selectedTab = 0 } else profiles.firstOrNull { !it.electric }?.let { selectVehicle(it) }
@@ -575,7 +576,7 @@ private fun RitbonApp() {
             }
             UpdateCard(context, prefs)
             if (selectedTab !in 7..10) VehicleProfilesCard(profiles, selectedVehicle.id, enabled = !running && !workdayActive,
-                onSelect = { selectVehicle(it) }, onSave = ::saveVehicleProfile, onDelete = ::deleteVehicleProfile)
+                onSelect = { selectVehicle(it) })
             HeroBanner(selectedTab)
             if (selectedTab == 2) {
                 TripHistory(context, prefs, history, selectedHistoryId, selectedVehicle,
@@ -628,8 +629,6 @@ private fun RitbonApp() {
             } else if (selectedTab == 7) {
                 StationsTab(context, prefs)
             } else if (selectedTab == 8) {
-                AppInfoTab(context)
-            } else if (selectedTab == 9) {
                 MaintenanceTab(prefs, prefs.getFloat(KEY_LAST_ODO, prefs.getFloat(KEY_END_ODO, 0f)), profiles, selectedVehicle.id,
                     onVehicleSelect = { profile ->
                         selectedVehicleId = profile.id
@@ -650,11 +649,13 @@ private fun RitbonApp() {
                             }
                         }
                     })
-            } else if (selectedTab == 10) {
+            } else if (selectedTab == 9) {
                 VehicleManagerTab(profiles, selectedVehicle.id, enabled = !running && !workdayActive,
                     onSelect = { selectVehicle(it, navigateToTripTab = false) },
                     onSave = ::saveVehicleProfile,
                     onDelete = ::deleteVehicleProfile)
+            } else if (selectedTab == 10) {
+                AppInfoTab(context)
             } else {
             val electricTab = selectedTab == 1
             val activeElectric = prefs.getBoolean(KEY_TRIP_ELECTRIC, false)
@@ -806,9 +807,9 @@ private fun HeroBanner(selectedTab: Int) {
         5 -> "RITSTATISTIEKEN"
         6 -> "ELEKTRISCH LADEN"
         7 -> "TANKEN & LADEN"
-        8 -> "OVER VLOTRIT"
-        9 -> "ONDERHOUD & HERINNERINGEN"
-        10 -> "JOUW VOERTUIGEN"
+        8 -> "ONDERHOUD & HERINNERINGEN"
+        9 -> "JOUW VOERTUIGEN"
+        10 -> "OVER VLOTRIT"
         else -> "BRANDSTOF & KILOMETERS"
     }
     val title = when (selectedTab) {
@@ -819,9 +820,9 @@ private fun HeroBanner(selectedTab: Int) {
         5 -> "Je kilometers.\nJe kosten."
         6 -> "Elke laadbeurt\noverzichtelijk."
         7 -> "Vind een plek\nin de buurt."
-        8 -> "Alle ritinfo.\nOp één plek."
-        9 -> "Onderhoud op\ntijd geregeld."
-        10 -> "Al je auto's.\nOp één plek."
+        8 -> "Onderhoud op\ntijd geregeld."
+        9 -> "Al je auto's.\nOp één plek."
+        10 -> "Alle ritinfo.\nOp één plek."
         else -> "Elke rit.\nHelder geregeld."
     }
     val subtitle = when (selectedTab) {
@@ -832,9 +833,9 @@ private fun HeroBanner(selectedTab: Int) {
         5 -> "Bekijk je ontwikkeling per week, maand of jaar."
         6 -> "Bewaar kWh, laadprijs en locatie per sessie."
         7 -> "Bekijk nabije tankstations en laadpunten op de kaart."
-        8 -> "Bekijk appversie, gegevens en updates."
-        9 -> "Bewaar APK-, onderhouds- en bandenwisseldata."
-        10 -> "Beheer je voertuigprofielen en kentekens."
+        8 -> "Bewaar APK-, onderhouds- en bandenwisseldata."
+        9 -> "Beheer je voertuigprofielen en kentekens."
+        10 -> "Bekijk appversie, gegevens en updates."
         else -> "Afstand, verbruik en kosten overzichtelijk bij elkaar."
     }
     Box(
@@ -917,46 +918,21 @@ private fun VehicleManagerTab(
 
 @Composable
 private fun VehicleProfilesCard(
-    profiles: List<VehicleProfile>, selectedId: String, enabled: Boolean,
-    onSelect: (VehicleProfile) -> Unit, onSave: (VehicleProfile) -> Unit, onDelete: (VehicleProfile) -> Unit
+    profiles: List<VehicleProfile>, selectedId: String, enabled: Boolean, onSelect: (VehicleProfile) -> Unit
 ) {
     var menuOpen by remember { mutableStateOf(false) }
-    var editor by remember { mutableStateOf<VehicleProfile?>(null) }
-    var creating by remember { mutableStateOf(false) }
-    var confirmDelete by remember { mutableStateOf(false) }
     val active = profiles.firstOrNull { it.id == selectedId } ?: profiles.first()
-    Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
-        Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-            Text("Voertuigprofiel", color = Ink, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-            Box {
-                OutlinedButton(onClick = { menuOpen = true }, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
-                    Text("${active.name}  ·  ${active.fuelType}${if (active.licensePlate.isNotBlank()) " · ${active.licensePlate}" else ""}  ▾", color = Forest)
-                }
-                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                    profiles.forEach { profile -> DropdownMenuItem(
-                        text = { Text("${profile.name} · ${profile.fuelType}${if (profile.licensePlate.isNotBlank()) " · ${profile.licensePlate}" else ""}") },
-                        onClick = { menuOpen = false; onSelect(profile) }, enabled = enabled
-                    ) }
-                }
-            }
-            Text("${active.consumption.formatNl()} ${if (active.electric) "kWh/100 km" else "L/100 km"} · ${active.depreciationPerKm.euro()}/km afschrijving", color = Muted, fontSize = 11.sp)
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                TextButton(onClick = { creating = true; editor = null }, enabled = enabled) { Text("+ Nieuw", color = Forest) }
-                TextButton(onClick = { editor = active; creating = false }, enabled = enabled) { Text("Bewerken", color = Forest) }
-                TextButton(onClick = { confirmDelete = true }, enabled = enabled && profiles.size > 1) { Text("Verwijderen", color = Color(0xFF9C422D)) }
-            }
+    Box {
+        OutlinedButton(onClick = { menuOpen = true }, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
+            Text("Voertuig: ${active.name} · ${active.fuelType}${if (active.licensePlate.isNotBlank()) " · ${active.licensePlate}" else ""}  ▾", color = Forest)
+        }
+        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+            profiles.forEach { profile -> DropdownMenuItem(
+                text = { Text("${profile.name} · ${profile.fuelType}${if (profile.licensePlate.isNotBlank()) " · ${profile.licensePlate}" else ""}") },
+                onClick = { menuOpen = false; onSelect(profile) }, enabled = enabled
+            ) }
         }
     }
-    if (creating || editor != null) VehicleProfileEditorDialog(editor, onDismiss = { creating = false; editor = null }, onSave = {
-        onSave(it); creating = false; editor = null
-    })
-    if (confirmDelete) AlertDialog(
-        onDismissRequest = { confirmDelete = false },
-        title = { Text("Voertuigprofiel verwijderen?") },
-        text = { Text("${active.name} wordt verwijderd. Bestaande ritten blijven bewaard.") },
-        confirmButton = { TextButton(onClick = { onDelete(active); confirmDelete = false }) { Text("Verwijderen", color = Color(0xFF9C422D)) } },
-        dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Annuleren") } }
-    )
 }
 
 @Composable
