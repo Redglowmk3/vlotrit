@@ -477,7 +477,7 @@ private fun RitbonApp() {
                 }
             }
             UpdateCard(context, prefs)
-            if (selectedTab != 7) VehicleProfilesCard(profiles, selectedVehicle.id, enabled = !running && !workdayActive,
+            if (selectedTab !in 7..8) VehicleProfilesCard(profiles, selectedVehicle.id, enabled = !running && !workdayActive,
                 onSelect = ::selectVehicle,
                 onSave = { profile ->
                     profiles = (profiles.filterNot { it.id == profile.id } + profile)
@@ -504,6 +504,7 @@ private fun RitbonApp() {
                 Tab(selected = selectedTab == 5, onClick = { selectedTab = 5 }, text = { Text("Inzicht") })
                 Tab(selected = selectedTab == 6, onClick = { selectedTab = 6 }, text = { Text("Laadbeurten") })
                 Tab(selected = selectedTab == 7, onClick = { selectedTab = 7 }, text = { Text("Stations") })
+                Tab(selected = selectedTab == 8, onClick = { selectedTab = 8 }, text = { Text("Info") })
             }
             if (selectedTab == 2) {
                 TripHistory(context, prefs, history, selectedHistoryId, selectedVehicle,
@@ -555,6 +556,8 @@ private fun RitbonApp() {
                 ChargeSessionsTab(prefs, selectedVehicle)
             } else if (selectedTab == 7) {
                 StationsTab(context, prefs)
+            } else if (selectedTab == 8) {
+                AppInfoTab(context)
             } else {
             val electricTab = selectedTab == 1
             val activeElectric = prefs.getBoolean(KEY_TRIP_ELECTRIC, false)
@@ -704,6 +707,7 @@ private fun HeroBanner(selectedTab: Int) {
         5 -> "RITSTATISTIEKEN"
         6 -> "ELEKTRISCH LADEN"
         7 -> "TANKEN & LADEN"
+        8 -> "OVER VLOTRIT"
         else -> "BRANDSTOF & KILOMETERS"
     }
     val title = when (selectedTab) {
@@ -714,6 +718,7 @@ private fun HeroBanner(selectedTab: Int) {
         5 -> "Je kilometers.\nJe kosten."
         6 -> "Elke laadbeurt\noverzichtelijk."
         7 -> "Vind een plek\nin de buurt."
+        8 -> "Alle ritinfo.\nOp één plek."
         else -> "Elke rit.\nHelder geregeld."
     }
     val subtitle = when (selectedTab) {
@@ -724,6 +729,7 @@ private fun HeroBanner(selectedTab: Int) {
         5 -> "Bekijk je ontwikkeling per week, maand of jaar."
         6 -> "Bewaar kWh, laadprijs en locatie per sessie."
         7 -> "Bekijk nabije tankstations en laadpunten op de kaart."
+        8 -> "Bekijk appversie, gegevens en updates."
         else -> "Afstand, verbruik en kosten overzichtelijk bij elkaar."
     }
     Box(
@@ -1271,6 +1277,57 @@ private fun ChargeSessionsTab(prefs: android.content.SharedPreferences, vehicle:
 }
 
 @Composable
+private fun AppInfoTab(context: Context) {
+    val packageInfo = remember {
+        runCatching { context.packageManager.getPackageInfo(context.packageName, 0) }.getOrNull()
+    }
+    val versionName = packageInfo?.versionName ?: "Onbekend"
+    @Suppress("DEPRECATION")
+    val versionCode = packageInfo?.let {
+        (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) it.longVersionCode else it.versionCode.toLong()).toString()
+    } ?: "Onbekend"
+
+    Column(verticalArrangement = Arrangement.spacedBy(13.dp)) {
+        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Color.White),
+            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
+            Row(Modifier.fillMaxWidth().padding(18.dp), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                Image(painter = painterResource(R.drawable.vlotrit_logo), contentDescription = "VLOTRIT-logo",
+                    modifier = Modifier.size(62.dp), contentScale = ContentScale.Crop)
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("VLOTRIT", color = Ink, fontWeight = FontWeight.ExtraBold, fontSize = 22.sp)
+                    Text("Ritten, kosten en routes overzichtelijk bij elkaar.", color = Muted, fontSize = 12.sp)
+                }
+            }
+        }
+        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Color.White),
+            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
+            Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("Appgegevens", color = Ink, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                HistoryDetailLine("Versie", versionName)
+                HistoryDetailLine("Buildnummer", versionCode)
+                HistoryDetailLine("App-id", context.packageName)
+                Text("Updates zijn beschikbaar via de updater bovenaan het scherm. Nieuwe versies worden als GitHub-release gepubliceerd.", color = Muted, fontSize = 12.sp, lineHeight = 17.sp)
+                TextButton(onClick = { openExternal(context, "https://github.com/Redglowmk3/vlotrit/releases/latest") }) {
+                    Text("Bekijk releases op GitHub ↗", color = Forest, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Color.White),
+            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
+            Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                Text("Kaart en prijzen", color = Ink, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                Text("Kaartgegevens © OpenStreetMap-bijdragers. Pompprijzen zijn indicatief en kunnen afwijken van de prijs aan de pomp.", color = Muted, fontSize = 12.sp, lineHeight = 17.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = { openExternal(context, "https://www.openstreetmap.org/copyright") }) { Text("OpenStreetMap", color = Forest) }
+                    TextButton(onClick = { openExternal(context, "https://hoeveelbenzine.nl/methodologie") }) { Text("Prijsbron", color = Forest) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun StationsTab(context: Context, prefs: android.content.SharedPreferences) {
     var filter by remember { mutableStateOf("Alles") }
     var stations by remember { mutableStateOf(emptyList<NearbyStation>()) }
@@ -1361,6 +1418,15 @@ private fun StationsTab(context: Context, prefs: android.content.SharedPreferenc
         Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
             listOf("Alles", "Tankstations", "Laadpunten").forEach { option ->
                 FilterChip(selected = filter == option, onClick = { filter = option }, label = { Text(option, fontSize = 11.sp) })
+            }
+        }
+        if (center != null) {
+            Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Color.White),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
+                Column(Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    StationMap(sortedStations, center!!, hasGpsCenter, Modifier.fillMaxWidth().height(245.dp))
+                    Text("© OpenStreetMap contributors · tik op een markering voor details", color = Muted, fontSize = 10.sp)
+                }
             }
         }
         Text(status, color = if (status.startsWith("Geen") || status.startsWith("Locatie")) Color(0xFF9A5B16) else Muted, fontSize = 11.sp)
@@ -1592,7 +1658,8 @@ private fun openExternal(context: Context, value: String) {
 private fun StationMap(stations: List<NearbyStation>, center: Pair<Double, Double>, hasGpsCenter: Boolean, modifier: Modifier = Modifier) {
     val markers = remember(stations) {
         JSONArray().apply { stations.forEach { station -> put(JSONObject().put("lat", station.latitude).put("lon", station.longitude)
-            .put("name", station.name).put("kind", station.kind).put("address", station.address).put("details", station.details)) } }.toString()
+            .put("name", station.name).put("kind", station.kind).put("address", station.address).put("details", station.details)
+            .put("priceE10", station.priceE10 ?: JSONObject.NULL)) } }.toString()
     }
     val script = remember(markers, center) {
         """const stations=$markers,me=[${center.first},${center.second}];
@@ -1603,7 +1670,7 @@ private fun StationMap(stations: List<NearbyStation>, center: Pair<Double, Doubl
             const points=[L.latLng(me[0],me[1])];
             L.circleMarker(me,{radius:8,color:'#ffffff',weight:3,fillColor:'#14395f',fillOpacity:1}).bindPopup('Jouw locatie').addTo(map);
             function safe(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-            stations.forEach(s=>{const p=L.latLng(s.lat,s.lon);points.push(p);const fuel=s.kind==='Tankstation';const marker=L.circleMarker(p,{radius:8,color:'#fff',weight:2,fillColor:fuel?'#ef8a3c':'#1883bd',fillOpacity:1});marker.bindPopup('<b>'+safe(s.name)+'</b><br>'+safe(s.kind)+(s.address?'<br>'+safe(s.address):'')+(s.details?'<br>'+safe(s.details):''));marker.addTo(map)});
+            stations.forEach(s=>{const p=L.latLng(s.lat,s.lon);points.push(p);const fuel=s.kind==='Tankstation';const marker=L.circleMarker(p,{radius:8,color:'#fff',weight:2,fillColor:fuel?'#ef8a3c':'#1883bd',fillOpacity:1});marker.bindPopup('<b>'+safe(s.name)+'</b><br>'+safe(s.kind)+(s.address?'<br>'+safe(s.address):'')+(s.priceE10?'<br>E10: €'+Number(s.priceE10).toFixed(3)+'/L':'')+(s.details?'<br>'+safe(s.details):''));marker.addTo(map)});
             if(!hasGpsCenter&&stations.length===0){map.setView(me,7)}else{map.fitBounds(L.latLngBounds(points).pad(0.2),{maxZoom:15})}setTimeout(()=>map.invalidateSize(),250);""".replace("!hasGpsCenter", "!${hasGpsCenter}")
     }
     MapWebView(script, modifier)
@@ -1625,7 +1692,7 @@ private fun MapWebView(script: String, modifier: Modifier) {
             settings.domStorageEnabled = true
             settings.cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
             val webViewAgent = android.webkit.WebSettings.getDefaultUserAgent(ctx)
-            settings.userAgentString = "$webViewAgent VLOTRIT/1.20 (+https://github.com/Redglowmk3/vlotrit)"
+            settings.userAgentString = "$webViewAgent VLOTRIT/1.21 (+https://github.com/Redglowmk3/vlotrit)"
             webViewClient = WebViewClient()
             setBackgroundColor(android.graphics.Color.rgb(238, 243, 247))
         }
