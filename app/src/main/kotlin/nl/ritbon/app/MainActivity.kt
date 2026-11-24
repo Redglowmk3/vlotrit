@@ -429,7 +429,7 @@ private fun RitbonApp() {
     val coroutineScope = rememberCoroutineScope()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
 
-    fun selectVehicle(profile: VehicleProfile) {
+    fun selectVehicle(profile: VehicleProfile, navigateToTripTab: Boolean = true) {
         selectedVehicleId = profile.id
         prefs.edit().putString(KEY_SELECTED_VEHICLE, profile.id).apply()
         consumption = profile.consumption.formatInput(); price = profile.price.formatPrice()
@@ -439,18 +439,47 @@ private fun RitbonApp() {
             electricDepreciation = profile.depreciationEnabled
             prefs.edit().putFloat(KEY_ELECTRIC_CONSUMPTION, profile.consumption).putFloat(KEY_ELECTRIC_PRICE, profile.price)
                 .putBoolean(KEY_ELECTRIC_DEPRECIATION, profile.depreciationEnabled).apply()
-            selectedTab = 1
+            if (navigateToTripTab) selectedTab = 1
         } else {
             fuelDepreciation = profile.depreciationEnabled
             prefs.edit().putFloat(KEY_CONSUMPTION, profile.consumption).putFloat(KEY_PRICE, profile.price)
                 .putBoolean(KEY_FUEL_DEPRECIATION, profile.depreciationEnabled).apply()
-            selectedTab = 0
+            if (navigateToTripTab) selectedTab = 0
         }
         prefs.edit().putFloat(KEY_DEPRECIATION_RATE, profile.depreciationPerKm).apply()
     }
     fun updateSelectedVehicle(profile: VehicleProfile) {
         profiles = profiles.map { if (it.id == profile.id) profile else it }
         writeVehicleProfiles(prefs, profiles)
+    }
+    fun saveVehicleProfile(profile: VehicleProfile) {
+        profiles = profiles.filterNot { it.id == profile.id } + profile
+        writeVehicleProfiles(prefs, profiles)
+        selectVehicle(profile, navigateToTripTab = selectedTab != 10)
+        if (profile.licensePlate.isNotBlank()) coroutineScope.launch {
+            try {
+                val rdw = withContext(Dispatchers.IO) { lookupRdwVehicle(profile.licensePlate) }
+                val updated = profile.copy(
+                    name = if (profile.name == "Mijn auto" && rdw.makeModel.isNotBlank()) rdw.makeModel else profile.name,
+                    fuelType = if (rdw.electric) "Elektrisch" else profile.fuelType,
+                    price = if (rdw.electric && !profile.electric) 0.30f else profile.price,
+                    consumption = rdw.consumption ?: profile.consumption
+                )
+                profiles = profiles.map { if (it.id == updated.id) updated else it }
+                writeVehicleProfiles(prefs, profiles)
+                if (selectedVehicleId == updated.id) selectVehicle(updated, navigateToTripTab = selectedTab != 10)
+                info = if (rdw.consumption != null) "RDW-testverbruik voor ${profile.licensePlate} ingevuld (${rdw.consumption.formatNl()} ${if (rdw.electric) "kWh/100 km" else "L/100 km"})." else "Kenteken gevonden; RDW heeft geen verbruikswaarde voor dit voertuig."
+            } catch (e: Exception) { info = e.message ?: "RDW-gegevens konden niet worden opgehaald." }
+        }
+    }
+    fun deleteVehicleProfile(profile: VehicleProfile) {
+        if (profiles.size <= 1) return
+        profiles = profiles.filterNot { it.id == profile.id }
+        writeVehicleProfiles(prefs, profiles)
+        if (selectedVehicleId == profile.id) {
+            val replacement = profiles.first()
+            selectVehicle(replacement, navigateToTripTab = selectedTab != 10)
+        }
     }
 
     LaunchedEffect(Unit) {
@@ -511,11 +540,11 @@ private fun RitbonApp() {
           ModalDrawerSheet {
               Text("VLOTRIT", modifier = Modifier.padding(horizontal = 22.dp, vertical = 22.dp), color = Ink, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
               HorizontalDivider()
-              listOf("Brandstof", "Elektrisch", "Ritten", "Planner", "Zakelijk", "Inzicht", "Laadbeurten", "Stations", "Info", "Onderhoud").forEachIndexed { index, label ->
+              listOf("Brandstof", "Elektrisch", "Ritten", "Planner", "Zakelijk", "Inzicht", "Laadbeurten", "Stations", "Info", "Onderhoud", "Voertuigen").forEachIndexed { index, label ->
                   NavigationDrawerItem(label = { Text(label) }, selected = selectedTab == index, onClick = {
                       when (index) {
-                          0 -> if (running || workdayActive) { if (!prefs.getBoolean(KEY_TRIP_ELECTRIC, false)) selectedTab = 0 } else profiles.firstOrNull { !it.electric }?.let(::selectVehicle)
-                          1 -> if (running || workdayActive) { if (prefs.getBoolean(KEY_TRIP_ELECTRIC, false)) selectedTab = 1 } else profiles.firstOrNull { it.electric }?.let(::selectVehicle)
+                          0 -> if (running || workdayActive) { if (!prefs.getBoolean(KEY_TRIP_ELECTRIC, false)) selectedTab = 0 } else profiles.firstOrNull { !it.electric }?.let { selectVehicle(it) }
+                          1 -> if (running || workdayActive) { if (prefs.getBoolean(KEY_TRIP_ELECTRIC, false)) selectedTab = 1 } else profiles.firstOrNull { it.electric }?.let { selectVehicle(it) }
                           else -> selectedTab = index
                       }
                       coroutineScope.launch { drawerState.close() }
@@ -545,37 +574,8 @@ private fun RitbonApp() {
                 }
             }
             UpdateCard(context, prefs)
-            if (selectedTab !in 7..9) VehicleProfilesCard(profiles, selectedVehicle.id, enabled = !running && !workdayActive,
-                onSelect = ::selectVehicle,
-                onSave = { profile ->
-                    profiles = (profiles.filterNot { it.id == profile.id } + profile)
-                    writeVehicleProfiles(prefs, profiles)
-                    selectVehicle(profile)
-                    if (profile.licensePlate.isNotBlank()) coroutineScope.launch {
-                        try {
-                            val rdw = withContext(Dispatchers.IO) { lookupRdwVehicle(profile.licensePlate) }
-                            val updated = profile.copy(
-                                name = if (profile.name == "Mijn auto" && rdw.makeModel.isNotBlank()) rdw.makeModel else profile.name,
-                                fuelType = if (rdw.electric) "Elektrisch" else profile.fuelType,
-                                consumption = rdw.consumption ?: profile.consumption
-                            )
-                            profiles = profiles.map { if (it.id == updated.id) updated else it }
-                            writeVehicleProfiles(prefs, profiles)
-                            if (selectedVehicleId == updated.id) selectVehicle(updated)
-                            info = if (rdw.consumption != null) "RDW-verbruik voor ${profile.licensePlate} ingevuld (${rdw.consumption.formatNl()} ${if (rdw.electric) "kWh/100 km" else "L/100 km"}; testwaarde)." else "Kenteken bij de RDW gevonden; voor dit voertuig was geen verbruikswaarde beschikbaar."
-                        } catch (e: Exception) { info = e.message ?: "RDW-gegevens konden niet worden opgehaald." }
-                    }
-                },
-                onDelete = { profile ->
-                    profiles = profiles.filterNot { it.id == profile.id }
-                    writeVehicleProfiles(prefs, profiles)
-                    if (selectedVehicleId == profile.id) {
-                        val replacement = profiles.first()
-                        selectedVehicleId = replacement.id
-                        prefs.edit().putString(KEY_SELECTED_VEHICLE, replacement.id).apply()
-                        selectVehicle(replacement)
-                    }
-                })
+            if (selectedTab !in 7..10) VehicleProfilesCard(profiles, selectedVehicle.id, enabled = !running && !workdayActive,
+                onSelect = { selectVehicle(it) }, onSave = ::saveVehicleProfile, onDelete = ::deleteVehicleProfile)
             HeroBanner(selectedTab)
             if (selectedTab == 2) {
                 TripHistory(context, prefs, history, selectedHistoryId, selectedVehicle,
@@ -650,6 +650,11 @@ private fun RitbonApp() {
                             }
                         }
                     })
+            } else if (selectedTab == 10) {
+                VehicleManagerTab(profiles, selectedVehicle.id, enabled = !running && !workdayActive,
+                    onSelect = { selectVehicle(it, navigateToTripTab = false) },
+                    onSave = ::saveVehicleProfile,
+                    onDelete = ::deleteVehicleProfile)
             } else {
             val electricTab = selectedTab == 1
             val activeElectric = prefs.getBoolean(KEY_TRIP_ELECTRIC, false)
@@ -803,6 +808,7 @@ private fun HeroBanner(selectedTab: Int) {
         7 -> "TANKEN & LADEN"
         8 -> "OVER VLOTRIT"
         9 -> "ONDERHOUD & HERINNERINGEN"
+        10 -> "JOUW VOERTUIGEN"
         else -> "BRANDSTOF & KILOMETERS"
     }
     val title = when (selectedTab) {
@@ -815,6 +821,7 @@ private fun HeroBanner(selectedTab: Int) {
         7 -> "Vind een plek\nin de buurt."
         8 -> "Alle ritinfo.\nOp één plek."
         9 -> "Onderhoud op\ntijd geregeld."
+        10 -> "Al je auto's.\nOp één plek."
         else -> "Elke rit.\nHelder geregeld."
     }
     val subtitle = when (selectedTab) {
@@ -827,6 +834,7 @@ private fun HeroBanner(selectedTab: Int) {
         7 -> "Bekijk nabije tankstations en laadpunten op de kaart."
         8 -> "Bekijk appversie, gegevens en updates."
         9 -> "Bewaar APK-, onderhouds- en bandenwisseldata."
+        10 -> "Beheer je voertuigprofielen en kentekens."
         else -> "Afstand, verbruik en kosten overzichtelijk bij elkaar."
     }
     Box(
@@ -857,6 +865,54 @@ private fun HeroBanner(selectedTab: Int) {
 private fun NumericField(label: String, value: String, onValue: (String) -> Unit, suffix: String, modifier: Modifier, enabled: Boolean) {
     OutlinedTextField(value = value, onValueChange = onValue, enabled = enabled, label = { Text(label, fontSize = 12.sp) }, trailingIcon = { Text(suffix, color = Muted, fontSize = 10.sp) }, modifier = modifier,
         shape = RoundedCornerShape(16.dp), singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+}
+
+@Composable
+private fun VehicleManagerTab(
+    profiles: List<VehicleProfile>, selectedId: String, enabled: Boolean,
+    onSelect: (VehicleProfile) -> Unit, onSave: (VehicleProfile) -> Unit, onDelete: (VehicleProfile) -> Unit
+) {
+    var editor by remember { mutableStateOf<VehicleProfile?>(null) }
+    var creating by remember { mutableStateOf(false) }
+    var deleteTarget by remember { mutableStateOf<VehicleProfile?>(null) }
+    Card(shape = RoundedCornerShape(21.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(2.dp)) {
+        Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(11.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                Column {
+                    Text("Voertuigen beheren", color = Ink, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Text("${profiles.size} voertuigprofiel${if (profiles.size == 1) "" else "len"}", color = Muted, fontSize = 12.sp)
+                }
+                Button(onClick = { creating = true; editor = null }, enabled = enabled) { Text("+ Toevoegen") }
+            }
+            Text("Kies een voertuig of bewerk de naam, het kenteken, brandstof, verbruik en afschrijving.", color = Muted, fontSize = 12.sp)
+            profiles.forEach { profile ->
+                Card(shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = if (profile.id == selectedId) BlueTint else Paper)) {
+                    Column(Modifier.fillMaxWidth().padding(13.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                            Text(profile.name, color = Ink, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                            if (profile.id == selectedId) Text("Actief", color = Forest, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                        }
+                        Text("${profile.licensePlate.ifBlank { "Geen kenteken" }} · ${profile.fuelType}", color = Muted, fontSize = 12.sp)
+                        Text("${profile.consumption.formatNl()} ${if (profile.electric) "kWh/100 km" else "L/100 km"} · ${profile.depreciationPerKm.euro()}/km afschrijving", color = Muted, fontSize = 11.sp)
+                        Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                            OutlinedButton(onClick = { onSelect(profile) }, enabled = enabled && profile.id != selectedId) { Text("Kiezen") }
+                            OutlinedButton(onClick = { editor = profile; creating = false }, enabled = enabled) { Text("Bewerken") }
+                            TextButton(onClick = { deleteTarget = profile }, enabled = enabled && profiles.size > 1) { Text("Verwijderen", color = Color(0xFF9C422D)) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (creating || editor != null) VehicleProfileEditorDialog(editor, onDismiss = { creating = false; editor = null }, onSave = {
+        onSave(it); creating = false; editor = null
+    })
+    deleteTarget?.let { target ->
+        AlertDialog(onDismissRequest = { deleteTarget = null }, title = { Text("Voertuig verwijderen?") },
+            text = { Text("${target.name} wordt verwijderd. Bestaande ritten blijven bewaard.") },
+            confirmButton = { TextButton(onClick = { onDelete(target); deleteTarget = null }) { Text("Verwijderen", color = Color(0xFF9C422D)) } },
+            dismissButton = { TextButton(onClick = { deleteTarget = null }) { Text("Annuleren") } })
+    }
 }
 
 @Composable
