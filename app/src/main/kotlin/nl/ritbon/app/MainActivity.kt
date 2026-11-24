@@ -535,6 +535,52 @@ private fun RitbonApp() {
         } catch (_: Exception) { priceInfo = "Prijs ophalen lukte niet · je kunt hem aanpassen" }
     }
 
+    val onTripAction: () -> Unit = {
+        val electricTab = selectedTab == 1
+        if (!running) {
+            val permissions = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+            if (Build.VERSION.SDK_INT >= 33) permissions.add(Manifest.permission.POST_NOTIFICATIONS)
+            val fine = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+            val coarse = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+            if (fine || coarse) startTrip(context, prefs, startOdo, if (electricTab) electricConsumption else consumption,
+                if (electricTab) electricPrice else price, tripName, electricTab, selectedVehicle)
+            else permissionLauncher.launch(permissions.toTypedArray())
+        } else {
+            val km = (distance.toFloatOrNull() ?: 0f).coerceAtLeast(0f)
+            val start = startOdo.toFloatOrNull() ?: prefs.getFloat(KEY_LAST_ODO, 0f)
+            val tripIsElectric = prefs.getBoolean(KEY_TRIP_ELECTRIC, false)
+            val tripFuelType = prefs.getString(KEY_ACTIVE_FUEL_TYPE, if (tripIsElectric) "Elektrisch" else "E10").orEmpty()
+            val tripConsumption = prefs.getFloat(KEY_ACTIVE_CONSUMPTION, prefs.getFloat(if (tripIsElectric) KEY_ELECTRIC_CONSUMPTION else KEY_CONSUMPTION, if (tripIsElectric) 18f else 11f))
+            val tripPrice = prefs.getFloat(KEY_ACTIVE_PRICE, prefs.getFloat(if (tripIsElectric) KEY_ELECTRIC_PRICE else KEY_PRICE, if (tripIsElectric) 0.30f else 2.092f))
+            endOdo = start + km
+            val stoppedAt = System.currentTimeMillis()
+            val savedRoute = prefs.getString(KEY_ROUTE, "").orEmpty()
+            val endpoints = routeEndpoints(savedRoute)
+            val record = TripRecord(stoppedAt, tripName, start, endOdo, km, tripConsumption,
+                tripPrice, if (tripFuelType == "E10") prefs.getLong(KEY_PRICE_UPDATED_AT, 0L) else 0L, prefs.getLong(KEY_STARTED_AT, stoppedAt), stoppedAt,
+                savedRoute, tripIsElectric, endpoints.first?.let(::coordinateLabel).orEmpty(), endpoints.second?.let(::coordinateLabel).orEmpty(),
+                prefs.getBoolean(KEY_ACTIVE_DEPRECIATION, prefs.getBoolean(if (tripIsElectric) KEY_ELECTRIC_DEPRECIATION else KEY_FUEL_DEPRECIATION, false)),
+                prefs.getFloat(KEY_ACTIVE_DEPRECIATION_RATE, prefs.getFloat(KEY_DEPRECIATION_RATE, 0.15f)),
+                prefs.getString(KEY_ACTIVE_VEHICLE_ID, "").orEmpty(), prefs.getString(KEY_ACTIVE_VEHICLE_NAME, "").orEmpty(), tripFuelType,
+                category = "Privé")
+            history = listOf(record) + readHistory(prefs)
+            writeHistory(prefs, history)
+            if (endpoints.first != null || endpoints.second != null) coroutineScope.launch {
+                val startAddress = endpoints.first?.let { withContext(Dispatchers.IO) { reverseGeocode(context, it) } }.orEmpty()
+                val endAddress = endpoints.second?.let { withContext(Dispatchers.IO) { reverseGeocode(context, it) } }.orEmpty()
+                val enriched = history.map { trip -> if (trip.id == stoppedAt) trip.copy(
+                    startLocation = startAddress.ifBlank { trip.startLocation }, endLocation = endAddress.ifBlank { trip.endLocation }) else trip }
+                history = enriched; writeHistory(prefs, enriched)
+            }
+            prefs.edit().putBoolean(KEY_RUNNING, false).putFloat(KEY_TRACKED_KM, km).putFloat(KEY_END_ODO, endOdo)
+                .putFloat(KEY_LAST_ODO, endOdo).putFloat(if (tripIsElectric) KEY_ELECTRIC_CONSUMPTION else KEY_CONSUMPTION, tripConsumption)
+                .putFloat(if (tripIsElectric) KEY_ELECTRIC_PRICE else KEY_PRICE, tripPrice).putString(KEY_NAME, tripName)
+                .putLong(KEY_STOPPED_AT, stoppedAt).apply()
+            context.stopService(Intent(context, RouteTrackingService::class.java)); running = false
+            startOdo = endOdo.formatInput(); info = "Eindstand ${endOdo.formatNl()} km opgeslagen als je volgende beginstand."
+        }
+    }
+
     MaterialTheme(colorScheme = lightColorScheme(primary = Forest, secondary = Color(0xFF39A9D6), background = Paper, surface = Color.White, onSurface = Ink)) {
       ModalNavigationDrawer(drawerState = drawerState, drawerContent = {
           ModalDrawerSheet {
@@ -554,30 +600,27 @@ private fun RitbonApp() {
           }
       }) {
         Column(Modifier.fillMaxSize().background(Paper).verticalScroll(rememberScrollState()).padding(horizontal = 18.dp, vertical = 20.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(11.dp)) {
-                    Canvas(Modifier.size(38.dp).clickable { coroutineScope.launch { drawerState.open() } }) {
-                        val stroke = 2.dp.toPx(); val left = size.width * .18f; val right = size.width * .82f
-                        listOf(.28f, .5f, .72f).forEach { y -> drawLine(Forest, androidx.compose.ui.geometry.Offset(left, size.height * y), androidx.compose.ui.geometry.Offset(right, size.height * y), strokeWidth = stroke, cap = StrokeCap.Round) }
-                    }
-                    Image(painter = painterResource(R.drawable.vlotrit_logo), contentDescription = "VLOTRIT-logo", modifier = Modifier.size(46.dp), contentScale = ContentScale.Crop)
-                    Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
-                        Text("VLOTRIT", fontSize = 19.sp, fontWeight = FontWeight.ExtraBold, color = Ink, letterSpacing = 1.1.sp)
-                        Text("RITTEN  ·  KOSTEN  ·  ROUTES", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Muted, letterSpacing = 1.sp)
-                    }
+            Box(Modifier.fillMaxWidth().height(56.dp)) {
+                Canvas(Modifier.align(Alignment.CenterStart).size(38.dp).clickable { coroutineScope.launch { drawerState.open() } }) {
+                    val stroke = 2.dp.toPx(); val left = size.width * .18f; val right = size.width * .82f
+                    listOf(.28f, .5f, .72f).forEach { y -> drawLine(Forest, androidx.compose.ui.geometry.Offset(left, size.height * y), androidx.compose.ui.geometry.Offset(right, size.height * y), strokeWidth = stroke, cap = StrokeCap.Round) }
+                }
+                Row(Modifier.align(Alignment.Center), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                    Image(painter = painterResource(R.drawable.vlotrit_logo), contentDescription = "VLOTRIT-logo", modifier = Modifier.size(39.dp), contentScale = ContentScale.Crop)
+                    Text("VLOTRIT", fontSize = 19.sp, fontWeight = FontWeight.ExtraBold, color = Ink, letterSpacing = 1.1.sp)
                 }
                 val isActive = workdayActive || running
-                Surface(color = if (isActive) BlueTint else Color.White, shape = RoundedCornerShape(50), shadowElevation = 1.dp) {
+                Surface(Modifier.align(Alignment.CenterEnd), color = if (isActive) BlueTint else Color.White, shape = RoundedCornerShape(50), shadowElevation = 1.dp) {
                     Row(Modifier.padding(horizontal = 12.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                         Canvas(Modifier.size(7.dp)) { drawCircle(if (isActive) Forest else Color(0xFF9AA9B7)) }
-                        Text(if (workdayActive) "Werkdag actief" else if (running) "Rit loopt" else if (prefs.getLong(KEY_STOPPED_AT, 0L) > 0L) "Rit afgerond" else "Startklaar", color = if (isActive) Forest else Muted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        Text(if (workdayActive) "Werkdag" else if (running) "Rit loopt" else "Startklaar", color = if (isActive) Forest else Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             }
-            UpdateCard(context, prefs)
             if (selectedTab !in 7..10) VehicleProfilesCard(profiles, selectedVehicle.id, enabled = !running && !workdayActive,
                 onSelect = { selectVehicle(it) })
-            HeroBanner(selectedTab)
+            HeroBanner(selectedTab, running, gpsError, workdayActive, onTripAction)
+            UpdateCard(context, prefs)
             if (selectedTab == 2) {
                 TripHistory(context, prefs, history, selectedHistoryId, selectedVehicle,
                     onSelect = { selectedHistoryId = it }, onTripsChanged = { history = it },
@@ -726,54 +769,6 @@ private fun RitbonApp() {
                     OutlinedTextField(value = tripName, onValueChange = { tripName = it }, enabled = !running, label = { Text("Naam / omschrijving (optioneel)") }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), singleLine = true)
                     if (running) Text("GPS meet ${distance.toFloatOrNull()?.formatNl() ?: "0"} km${if (gpsError.isNotBlank()) " · $gpsError" else ""}.", color = Muted, fontSize = 12.sp)
                     if (info.isNotBlank()) Text(info, color = Forest, fontSize = 12.sp)
-                    Button(onClick = {
-                        if (!running) {
-                            val permissions = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
-                            if (Build.VERSION.SDK_INT >= 33) permissions.add(Manifest.permission.POST_NOTIFICATIONS)
-                            val fine = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-                            val coarse = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
-                            if (fine || coarse) startTrip(context, prefs, startOdo, displayedConsumption, displayedPrice, tripName, electricTab, selectedVehicle) else permissionLauncher.launch(permissions.toTypedArray())
-                        } else {
-                            val km = (distance.toFloatOrNull() ?: 0f).coerceAtLeast(0f)
-                            val start = startOdo.toFloatOrNull() ?: prefs.getFloat(KEY_LAST_ODO, 0f)
-                            val tripIsElectric = prefs.getBoolean(KEY_TRIP_ELECTRIC, false)
-                            val tripFuelType = prefs.getString(KEY_ACTIVE_FUEL_TYPE, if (tripIsElectric) "Elektrisch" else "E10").orEmpty()
-                            val tripConsumption = prefs.getFloat(KEY_ACTIVE_CONSUMPTION, prefs.getFloat(if (tripIsElectric) KEY_ELECTRIC_CONSUMPTION else KEY_CONSUMPTION, if (tripIsElectric) 18f else 11f))
-                            val tripPrice = prefs.getFloat(KEY_ACTIVE_PRICE, prefs.getFloat(if (tripIsElectric) KEY_ELECTRIC_PRICE else KEY_PRICE, if (tripIsElectric) 0.30f else 2.092f))
-                            endOdo = start + km
-                            val stoppedAt = System.currentTimeMillis()
-                            val savedRoute = prefs.getString(KEY_ROUTE, "").orEmpty()
-                            val endpoints = routeEndpoints(savedRoute)
-                            val record = TripRecord(stoppedAt, tripName, start, endOdo, km, tripConsumption,
-                                tripPrice, if (tripFuelType == "E10") prefs.getLong(KEY_PRICE_UPDATED_AT, 0L) else 0L, prefs.getLong(KEY_STARTED_AT, stoppedAt), stoppedAt,
-                                savedRoute, tripIsElectric, endpoints.first?.let(::coordinateLabel).orEmpty(), endpoints.second?.let(::coordinateLabel).orEmpty(),
-                                prefs.getBoolean(KEY_ACTIVE_DEPRECIATION, prefs.getBoolean(if (tripIsElectric) KEY_ELECTRIC_DEPRECIATION else KEY_FUEL_DEPRECIATION, false)),
-                                prefs.getFloat(KEY_ACTIVE_DEPRECIATION_RATE, prefs.getFloat(KEY_DEPRECIATION_RATE, 0.15f)),
-                                prefs.getString(KEY_ACTIVE_VEHICLE_ID, "").orEmpty(), prefs.getString(KEY_ACTIVE_VEHICLE_NAME, "").orEmpty(), tripFuelType,
-                                category = "Privé")
-                            history = listOf(record) + readHistory(prefs)
-                            writeHistory(prefs, history)
-                            if (endpoints.first != null || endpoints.second != null) {
-                                coroutineScope.launch {
-                                    val startAddress = endpoints.first?.let { withContext(Dispatchers.IO) { reverseGeocode(context, it) } }.orEmpty()
-                                    val endAddress = endpoints.second?.let { withContext(Dispatchers.IO) { reverseGeocode(context, it) } }.orEmpty()
-                                    val enriched = history.map { trip -> if (trip.id == stoppedAt) trip.copy(
-                                        startLocation = startAddress.ifBlank { trip.startLocation },
-                                        endLocation = endAddress.ifBlank { trip.endLocation }) else trip }
-                                    history = enriched
-                                    writeHistory(prefs, enriched)
-                                }
-                            }
-                            prefs.edit().putBoolean(KEY_RUNNING, false).putFloat(KEY_TRACKED_KM, km).putFloat(KEY_END_ODO, endOdo)
-                                .putFloat(KEY_LAST_ODO, endOdo).putFloat(if (tripIsElectric) KEY_ELECTRIC_CONSUMPTION else KEY_CONSUMPTION, tripConsumption)
-                                .putFloat(if (tripIsElectric) KEY_ELECTRIC_PRICE else KEY_PRICE, tripPrice).putString(KEY_NAME, tripName)
-                                .putLong(KEY_STOPPED_AT, stoppedAt).apply()
-                            context.stopService(Intent(context, RouteTrackingService::class.java)); running = false
-                            startOdo = endOdo.formatInput(); info = "Eindstand ${endOdo.formatNl()} km opgeslagen als je volgende beginstand."
-                        }
-                    }, modifier = Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(14.dp)) {
-                        Text(if (running) "■  Stop rit & maak bon" else "▶  Start rit", fontWeight = FontWeight.Bold)
-                    }
                     if (!running && endOdo > 0f) TextButton(onClick = {
                         prefs.edit().putBoolean(KEY_RUNNING, false).putFloat(KEY_TRACKED_KM, 0f).putFloat(KEY_START_ODO, endOdo).putFloat(KEY_END_ODO, 0f).putString(KEY_ROUTE, "").putLong(KEY_STOPPED_AT, 0L).apply()
                         startOdo = endOdo.formatInput(); distance = "0"; route = ""; info = "Nieuwe rit klaar. Beginstand overgenomen."
@@ -798,7 +793,11 @@ private fun RitbonApp() {
 }
 
 @Composable
-private fun HeroBanner(selectedTab: Int) {
+private fun HeroBanner(selectedTab: Int, running: Boolean, gpsError: String, workdayActive: Boolean, onTripAction: () -> Unit) {
+    if (selectedTab in 0..1 && !workdayActive) {
+        TripActionBanner(running, gpsError, onTripAction)
+        return
+    }
     val section = when (selectedTab) {
         1 -> "ELEKTRISCH RIJDEN"
         2 -> "JOUW RITTEN"
@@ -863,6 +862,57 @@ private fun HeroBanner(selectedTab: Int) {
 }
 
 @Composable
+private fun TripActionBanner(running: Boolean, gpsError: String, onTripAction: () -> Unit) {
+    Box(
+        Modifier.fillMaxWidth()
+            .background(Brush.linearGradient(listOf(Color(0xFF1688D2), Color(0xFF07569A), Color(0xFF123B70))), RoundedCornerShape(27.dp))
+            .padding(horizontal = 22.dp, vertical = 22.dp)
+    ) {
+        Canvas(Modifier.align(Alignment.CenterEnd).size(width = 175.dp, height = 155.dp)) {
+            val mesh = Path().apply {
+                moveTo(size.width * .05f, size.height * .91f)
+                cubicTo(size.width * .25f, size.height * .75f, size.width * .36f, size.height * .45f, size.width * .55f, size.height * .57f)
+                cubicTo(size.width * .72f, size.height * .68f, size.width * .78f, size.height * .22f, size.width * .99f, size.height * .12f)
+            }
+            drawPath(mesh, Color.White.copy(alpha = .52f), style = Stroke(width = 4.dp.toPx(), cap = StrokeCap.Round))
+            for (row in 0..5) for (column in 0..7) {
+                val x = size.width * (column / 7f)
+                val y = size.height * (.48f + row * .085f)
+                drawCircle(Color.White.copy(alpha = .12f), radius = 1.2.dp.toPx(), center = androidx.compose.ui.geometry.Offset(x, y))
+            }
+            drawCircle(Color.White, radius = 5.dp.toPx(), center = androidx.compose.ui.geometry.Offset(size.width * .05f, size.height * .91f))
+            drawCircle(Color.White, radius = 5.dp.toPx(), center = androidx.compose.ui.geometry.Offset(size.width * .99f, size.height * .12f))
+        }
+        Column(Modifier.fillMaxWidth(.88f), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+            Text(if (running) "RIT LOOPT" else "KLAAR VOOR EEN NIEUWE RIT?", color = Color.White.copy(alpha = .82f), fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
+            Text(if (running) "Je route wordt\nbijgehouden." else "Ritregistratie\nstaat klaar.", color = Color.White, fontSize = 27.sp, lineHeight = 30.sp, fontWeight = FontWeight.ExtraBold)
+            Text(
+                when {
+                    running && gpsError.isNotBlank() -> gpsError
+                    running -> "Live GPS en ritregistratie actief."
+                    else -> "GPS start zodra je een rit begint."
+                },
+                color = Color.White.copy(alpha = .9f), fontSize = 13.sp, lineHeight = 18.sp
+            )
+            Button(
+                onClick = onTripAction,
+                modifier = Modifier.fillMaxWidth(.85f).height(54.dp),
+                shape = RoundedCornerShape(50),
+                colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color(0xFF148449)),
+                elevation = ButtonDefaults.buttonElevation(defaultElevation = 2.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                    Text(if (running) "Stop rit & maak bon" else "Start rit", fontWeight = FontWeight.ExtraBold, fontSize = 16.sp)
+                    Surface(color = Color(0xFFE4F8EA), shape = RoundedCornerShape(50)) {
+                        Text(if (running) "● LIVE" else "GPS", modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp), color = Color(0xFF138447), fontSize = 10.sp, fontWeight = FontWeight.ExtraBold)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun NumericField(label: String, value: String, onValue: (String) -> Unit, suffix: String, modifier: Modifier, enabled: Boolean) {
     OutlinedTextField(value = value, onValueChange = onValue, enabled = enabled, label = { Text(label, fontSize = 12.sp) }, trailingIcon = { Text(suffix, color = Muted, fontSize = 10.sp) }, modifier = modifier,
         shape = RoundedCornerShape(16.dp), singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
@@ -922,15 +972,64 @@ private fun VehicleProfilesCard(
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     val active = profiles.firstOrNull { it.id == selectedId } ?: profiles.first()
-    Box {
-        OutlinedButton(onClick = { menuOpen = true }, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
-            Text("Voertuig: ${active.name} · ${active.fuelType}${if (active.licensePlate.isNotBlank()) " · ${active.licensePlate}" else ""}  ▾", color = Forest)
+    Card(shape = RoundedCornerShape(23.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(2.dp)) {
+        Box {
+            Row(Modifier.fillMaxWidth().clickable(enabled = enabled) { menuOpen = true }.padding(15.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                VehicleSilhouette(Modifier.width(104.dp).height(60.dp))
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(active.name, color = Ink, fontSize = 17.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 20.sp)
+                    Text("${active.consumption.formatNl()} ${if (active.electric) "kWh/100 km" else "L/100 km"}", color = Muted, fontSize = 11.sp)
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Surface(color = BlueTint, shape = RoundedCornerShape(7.dp)) {
+                            Text(active.licensePlate.ifBlank { "Kenteken toevoegen" }, modifier = Modifier.padding(horizontal = 7.dp, vertical = 5.dp), color = Ink, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                        Surface(color = if (active.electric) Color(0xFFE5F4FB) else Color(0xFFE2F7E8), shape = RoundedCornerShape(7.dp)) {
+                            Text(active.fuelType, modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp), color = if (active.electric) Color(0xFF1674A7) else Color(0xFF168044), fontSize = 11.sp, fontWeight = FontWeight.ExtraBold)
+                        }
+                    }
+                }
+                Text("⌄", color = Muted, fontSize = 21.sp, fontWeight = FontWeight.Bold)
+            }
+            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                profiles.forEach { profile -> DropdownMenuItem(
+                    text = { Column { Text(profile.name, fontWeight = FontWeight.SemiBold); Text("${profile.licensePlate.ifBlank { profile.fuelType }} · ${profile.consumption.formatNl()} ${if (profile.electric) "kWh/100 km" else "L/100 km"}", color = Muted, fontSize = 11.sp) } },
+                    onClick = { menuOpen = false; onSelect(profile) }, enabled = enabled
+                ) }
+            }
         }
-        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-            profiles.forEach { profile -> DropdownMenuItem(
-                text = { Text("${profile.name} · ${profile.fuelType}${if (profile.licensePlate.isNotBlank()) " · ${profile.licensePlate}" else ""}") },
-                onClick = { menuOpen = false; onSelect(profile) }, enabled = enabled
-            ) }
+    }
+}
+
+@Composable
+private fun VehicleSilhouette(modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        val car = Path().apply {
+            moveTo(size.width * .06f, size.height * .69f)
+            cubicTo(size.width * .08f, size.height * .56f, size.width * .17f, size.height * .50f, size.width * .32f, size.height * .45f)
+            lineTo(size.width * .42f, size.height * .22f)
+            cubicTo(size.width * .45f, size.height * .16f, size.width * .52f, size.height * .15f, size.width * .60f, size.height * .18f)
+            lineTo(size.width * .74f, size.height * .24f)
+            cubicTo(size.width * .79f, size.height * .27f, size.width * .82f, size.height * .35f, size.width * .85f, size.height * .42f)
+            lineTo(size.width * .95f, size.height * .51f)
+            cubicTo(size.width * .99f, size.height * .56f, size.width, size.height * .65f, size.width * .97f, size.height * .74f)
+            lineTo(size.width * .94f, size.height * .81f)
+            lineTo(size.width * .08f, size.height * .81f)
+            close()
+        }
+        drawPath(car, Ink)
+        val windows = Path().apply {
+            moveTo(size.width * .38f, size.height * .42f)
+            lineTo(size.width * .46f, size.height * .25f)
+            cubicTo(size.width * .49f, size.height * .21f, size.width * .55f, size.height * .22f, size.width * .60f, size.height * .24f)
+            lineTo(size.width * .70f, size.height * .29f)
+            lineTo(size.width * .76f, size.height * .43f)
+            close()
+        }
+        drawPath(windows, BlueTint)
+        listOf(.28f, .76f).forEach { x ->
+            drawCircle(Ink, size.height * .19f, androidx.compose.ui.geometry.Offset(size.width * x, size.height * .76f))
+            drawCircle(Color(0xFFEAF0F7), size.height * .09f, androidx.compose.ui.geometry.Offset(size.width * x, size.height * .76f))
+            drawCircle(Color(0xFF8494A5), size.height * .035f, androidx.compose.ui.geometry.Offset(size.width * x, size.height * .76f))
         }
     }
 }
