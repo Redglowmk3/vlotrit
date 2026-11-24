@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -24,13 +25,7 @@ class RouteTrackingService : Service(), LocationListener {
     override fun onCreate() {
         super.onCreate()
         createChannel()
-        val notification: Notification = NotificationCompat.Builder(this, CHANNEL)
-            .setSmallIcon(android.R.drawable.ic_menu_mylocation)
-            .setContentTitle(if (prefs.getBoolean(KEY_WORKDAY_ACTIVE, false)) "VLOTRIT zakelijke werkdag" else "Vlotrit registreert je rit")
-            .setContentText(if (prefs.getBoolean(KEY_WORKDAY_ACTIVE, false)) "Ritten starten en stoppen automatisch" else "GPS-route wordt bijgehouden")
-            .setOngoing(true)
-            .build()
-        startForeground(21, notification)
+        startForeground(NOTIFICATION_ID, buildTrackingNotification())
         manager = getSystemService(LOCATION_SERVICE) as LocationManager
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
@@ -47,7 +42,29 @@ class RouteTrackingService : Service(), LocationListener {
         }
     }
 
+    private fun buildTrackingNotification(): Notification {
+        val workday = prefs.getBoolean(KEY_WORKDAY_ACTIVE, false)
+        val running = prefs.getBoolean(KEY_RUNNING, false)
+        val km = prefs.getFloat(KEY_TRACKED_KM, 0f)
+        val contentIntent = PendingIntent.getActivity(
+            this, 0, Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        return NotificationCompat.Builder(this, if (prefs.getBoolean("setting_tracking_notification", true)) CHANNEL else QUIET_CHANNEL)
+            .setSmallIcon(android.R.drawable.ic_menu_mylocation)
+            .setContentTitle(when { workday -> "VLOTRIT zakelijke werkdag"; running -> "VLOTRIT volgt je rit"; else -> "VLOTRIT is actief" })
+            .setContentText(when { workday -> "Automatische ritregistratie actief"; running -> "GPS-route · ${"%.1f".format(java.util.Locale.getDefault(), km)} km geregistreerd"; else -> "GPS-locatie wordt bijgehouden" })
+            .setContentIntent(contentIntent)
+            .setOnlyAlertOnce(true)
+            .setOngoing(true)
+            .build()
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_REFRESH_TRACKING_NOTIFICATION) {
+            startForeground(NOTIFICATION_ID, buildTrackingNotification())
+            return START_STICKY
+        }
         if (intent?.action == ACTION_STOP_WORKDAY) {
             saveAutomaticBusinessTrip(prefs)
             prefs.edit().putBoolean(KEY_WORKDAY_ACTIVE, false).apply()
@@ -64,7 +81,7 @@ class RouteTrackingService : Service(), LocationListener {
             handleBusinessLocation(location)
             return
         }
-        if (!prefs.getBoolean(KEY_RUNNING, false)) return
+        if (!prefs.getBoolean(KEY_RUNNING, false) || !prefs.getBoolean(KEY_TRACKING_ENABLED, true)) return
         recordTripLocation(location)
     }
 
@@ -118,6 +135,14 @@ class RouteTrackingService : Service(), LocationListener {
         val updatedRoute = if (points.size < 700 && (points.isEmpty() || km != prefs.getFloat(KEY_TRACKED_KM, 0f).toDouble())) "$route${if (route.isEmpty()) "" else ";"}$point" else route
         prefs.edit().putFloat(KEY_TRACKED_KM, km.toFloat()).putFloat(KEY_LAST_LAT, location.latitude.toFloat())
             .putFloat(KEY_LAST_LON, location.longitude.toFloat()).putString(KEY_ROUTE, updatedRoute).remove(KEY_GPS_ERROR).apply()
+        if (prefs.getBoolean("setting_tracking_notification", true)) {
+            val now = System.currentTimeMillis()
+            if (km - lastNotificationKm >= 0.1 || now - lastNotificationAt >= 20_000L) {
+                lastNotificationKm = km.toFloat()
+                lastNotificationAt = now
+                getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, buildTrackingNotification())
+            }
+        }
     }
 
     @Deprecated("Deprecated by Android") override fun onStatusChanged(provider: String?, status: Int, extras: android.os.Bundle?) = Unit
@@ -129,12 +154,20 @@ class RouteTrackingService : Service(), LocationListener {
     private fun createChannel() {
         if (Build.VERSION.SDK_INT >= 26) {
             val channel = NotificationChannel(CHANNEL, "Ritregistratie", NotificationManager.IMPORTANCE_LOW)
+            channel.description = "Blijvende melding tijdens het opnemen van een GPS-route."
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+            val quietChannel = NotificationChannel(QUIET_CHANNEL, "Ritregistratie (stil)", NotificationManager.IMPORTANCE_MIN)
+            quietChannel.description = "Minimale stille melding die Android vereist bij achtergrond-GPS."
+            getSystemService(NotificationManager::class.java).createNotificationChannel(quietChannel)
         }
     }
     private var movementStreak = 0
+    private var lastNotificationKm = -1f
+    private var lastNotificationAt = 0L
     companion object {
-        private const val CHANNEL = "ritbon_tracking"
+        private const val CHANNEL = "vlotrit_tracking_visible"
+        private const val QUIET_CHANNEL = "vlotrit_tracking_quiet"
+        private const val NOTIFICATION_ID = 21
         private const val BUSINESS_STOP_AFTER_IDLE_MS = 5 * 60 * 1000L
     }
 }

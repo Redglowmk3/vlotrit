@@ -99,6 +99,7 @@ const val KEY_LAST_LON = "last_lon"
 const val KEY_ROUTE = "route_points"
 const val KEY_GPS_ERROR = "gps_error"
 const val KEY_RUNNING = "running"
+const val KEY_TRACKING_ENABLED = "trip_tracking_enabled"
 const val KEY_CONSUMPTION = "consumption"
 const val KEY_PRICE = "price"
 const val KEY_NAME = "trip_name"
@@ -122,6 +123,7 @@ const val KEY_BUSINESS_STARTED_AT = "business_started_at"
 const val KEY_BUSINESS_LAST_MOVING_AT = "business_last_moving_at"
 const val ACTION_START_WORKDAY = "nl.ritbon.app.START_WORKDAY"
 const val ACTION_STOP_WORKDAY = "nl.ritbon.app.STOP_WORKDAY"
+const val ACTION_REFRESH_TRACKING_NOTIFICATION = "nl.ritbon.app.REFRESH_TRACKING_NOTIFICATION"
 private const val KEY_VEHICLES = "vehicle_profiles"
 private const val KEY_SELECTED_VEHICLE = "selected_vehicle"
 private const val KEY_ACTIVE_VEHICLE_ID = "active_vehicle_id"
@@ -432,6 +434,7 @@ private fun RitbonApp() {
     var electricPrice by remember { mutableStateOf(prefs.getFloat(KEY_ELECTRIC_PRICE, 0.30f).formatPrice()) }
     var tripName by remember { mutableStateOf(prefs.getString(KEY_NAME, "").orEmpty()) }
     var running by remember { mutableStateOf(prefs.getBoolean(KEY_RUNNING, false)) }
+    var showTripStartDialog by remember { mutableStateOf(false) }
     var workdayActive by remember { mutableStateOf(prefs.getBoolean(KEY_WORKDAY_ACTIVE, false)) }
     var businessTripActive by remember { mutableStateOf(prefs.getBoolean(KEY_BUSINESS_TRIP_ACTIVE, false)) }
     var businessLabel by remember { mutableStateOf(prefs.getString(KEY_BUSINESS_LABEL, "").orEmpty()) }
@@ -446,6 +449,7 @@ private fun RitbonApp() {
     var soundEffects by remember { mutableStateOf(prefs.getBoolean("setting_sound_effects", true)) }
     var shakeToSelect by remember { mutableStateOf(prefs.getBoolean("setting_shake_trip", true)) }
     var timeGreetings by remember { mutableStateOf(prefs.getBoolean("setting_time_greetings", true)) }
+    var trackingNotification by remember { mutableStateOf(prefs.getBoolean("setting_tracking_notification", true)) }
     val systemDark = androidx.compose.foundation.isSystemInDarkTheme()
     val darkMode = themeMode == "dark" || (themeMode == "system" && systemDark)
     var fuelDepreciation by remember { mutableStateOf(prefs.getBoolean(KEY_FUEL_DEPRECIATION, false)) }
@@ -616,8 +620,10 @@ private fun RitbonApp() {
         } else {
             val isElectric = selectedTab == 1
             startTrip(context, prefs, startOdo, if (isElectric) electricConsumption else consumption,
-                if (isElectric) electricPrice else price, tripName, isElectric, selectedVehicle)
+                if (isElectric) electricPrice else price, tripName, isElectric, selectedVehicle, trackingEnabled = grants[Manifest.permission.ACCESS_FINE_LOCATION] == true || grants[Manifest.permission.ACCESS_COARSE_LOCATION] == true)
+            running = true
             if (!ok) info = "Geen locatietoegang: vul de gereden afstand handmatig in."
+            else if (Build.VERSION.SDK_INT >= 33 && grants[Manifest.permission.POST_NOTIFICATIONS] == false) info = "Rit gestart. Sta VLOTRIT-meldingen toe in Android-instellingen om de trackingmelding bovenin te zien."
             else if (grants[Manifest.permission.ACCESS_FINE_LOCATION] != true) info = "Voor een nauwkeurige route: kies bij Locatietoegang voor Precieze locatie."
         }
     }
@@ -651,16 +657,33 @@ private fun RitbonApp() {
         } catch (_: Exception) { priceInfo = "Prijs ophalen lukte niet · je kunt hem aanpassen" }
     }
 
+    fun beginSelectedTrip(trackGps: Boolean) {
+        val electricTab = selectedTab == 1
+        val consumptionValue = if (electricTab) electricConsumption else consumption
+        val priceValue = if (electricTab) electricPrice else price
+        if (trackGps) {
+            val fine = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+            val coarse = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+            val notificationAllowed = Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+            if ((fine || coarse) && notificationAllowed) {
+                startTrip(context, prefs, startOdo, consumptionValue, priceValue, tripName, electricTab, selectedVehicle, trackingEnabled = true)
+                running = true
+            } else {
+                val permissions = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+                if (Build.VERSION.SDK_INT >= 33) permissions.add(Manifest.permission.POST_NOTIFICATIONS)
+                permissionLauncher.launch(permissions.toTypedArray())
+            }
+        } else {
+            startTrip(context, prefs, startOdo, consumptionValue, priceValue, tripName, electricTab, selectedVehicle, trackingEnabled = false)
+            running = true
+            info = "Rit gestart zonder GPS. Je kunt de afstand zelf invullen."
+        }
+    }
+
     val onTripAction: () -> Unit = {
         val electricTab = selectedTab == 1
         if (!running) {
-            val permissions = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
-            if (Build.VERSION.SDK_INT >= 33) permissions.add(Manifest.permission.POST_NOTIFICATIONS)
-            val fine = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-            val coarse = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
-            if (fine || coarse) startTrip(context, prefs, startOdo, if (electricTab) electricConsumption else consumption,
-                if (electricTab) electricPrice else price, tripName, electricTab, selectedVehicle)
-            else permissionLauncher.launch(permissions.toTypedArray())
+            showTripStartDialog = true
         } else {
             val km = (distance.toFloatOrNull() ?: 0f).coerceAtLeast(0f)
             val start = startOdo.toFloatOrNull() ?: prefs.getFloat(KEY_LAST_ODO, 0f)
@@ -688,7 +711,7 @@ private fun RitbonApp() {
                     startLocation = startAddress.ifBlank { trip.startLocation }, endLocation = endAddress.ifBlank { trip.endLocation }) else trip }
                 history = enriched; writeHistory(prefs, enriched)
             }
-            prefs.edit().putBoolean(KEY_RUNNING, false).putFloat(KEY_TRACKED_KM, km).putFloat(KEY_END_ODO, endOdo)
+            prefs.edit().putBoolean(KEY_RUNNING, false).putBoolean(KEY_TRACKING_ENABLED, false).putFloat(KEY_TRACKED_KM, km).putFloat(KEY_END_ODO, endOdo)
                 .putFloat(KEY_LAST_ODO, endOdo).putFloat(if (tripIsElectric) KEY_ELECTRIC_CONSUMPTION else KEY_CONSUMPTION, tripConsumption)
                 .putFloat(if (tripIsElectric) KEY_ELECTRIC_PRICE else KEY_PRICE, tripPrice).putString(KEY_NAME, tripName)
                 .putLong(KEY_STOPPED_AT, stoppedAt).apply()
@@ -770,6 +793,13 @@ private fun RitbonApp() {
                         Modifier.padding(horizontal = 15.dp, vertical = 12.dp), color = Ink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                 }
             }
+            if (showTripStartDialog) AlertDialog(
+                onDismissRequest = { showTripStartDialog = false },
+                title = { Text("Rit starten") },
+                text = { Text("Wil je de route met GPS laten opnemen? Zonder GPS kun je de gereden afstand tijdens de rit zelf invullen.") },
+                confirmButton = { TextButton(onClick = { showTripStartDialog = false; beginSelectedTrip(trackGps = true) }) { Text("Start met GPS") } },
+                dismissButton = { TextButton(onClick = { showTripStartDialog = false; beginSelectedTrip(trackGps = false) }) { Text("Start zonder GPS") } }
+            )
             if (showFreeFuelDialog) AlertDialog(
                 onDismissRequest = { showFreeFuelDialog = false },
                 title = { Text("Gratis tankbeurt!") },
@@ -881,11 +911,18 @@ private fun RitbonApp() {
                     onSave = ::saveVehicleProfile,
                     onDelete = ::deleteVehicleProfile)
             } else if (selectedTab == 10) {
-                SettingsTab(themeMode, soundEffects, shakeToSelect, timeGreetings,
+                SettingsTab(themeMode, soundEffects, shakeToSelect, timeGreetings, trackingNotification,
                     onThemeChange = { themeMode = it; prefs.edit().putString("setting_theme", it).apply() },
                     onSoundChange = { soundEffects = it; prefs.edit().putBoolean("setting_sound_effects", it).apply() },
                     onShakeChange = { shakeToSelect = it; prefs.edit().putBoolean("setting_shake_trip", it).apply() },
-                    onGreetingsChange = { timeGreetings = it; prefs.edit().putBoolean("setting_time_greetings", it).apply() })
+                    onGreetingsChange = { timeGreetings = it; prefs.edit().putBoolean("setting_time_greetings", it).apply() },
+                    onTrackingNotificationChange = {
+                        trackingNotification = it
+                        prefs.edit().putBoolean("setting_tracking_notification", it).apply()
+                        if (running && prefs.getBoolean(KEY_TRACKING_ENABLED, false)) {
+                            context.startService(Intent(context, RouteTrackingService::class.java).setAction(ACTION_REFRESH_TRACKING_NOTIFICATION))
+                        }
+                    })
             } else if (selectedTab == 11) {
                 AppInfoTab(context, latestRelease, availableRelease, checkingUpdates) { coroutineScope.launch { checkForAppUpdate() } }
             } else {
@@ -1507,7 +1544,7 @@ class UpdateInstallReceiver : BroadcastReceiver() {
     }
 }
 
-private fun startTrip(context: Context, prefs: android.content.SharedPreferences, startText: String, consumption: String, price: String, name: String, electric: Boolean, vehicle: VehicleProfile) {
+private fun startTrip(context: Context, prefs: android.content.SharedPreferences, startText: String, consumption: String, price: String, name: String, electric: Boolean, vehicle: VehicleProfile, trackingEnabled: Boolean = true) {
     val start = startText.toFloatOrNull() ?: prefs.getFloat(KEY_LAST_ODO, 0f)
     val tripConsumption = consumption.replace(',', '.').toFloatOrNull() ?: vehicle.consumption
     val tripPrice = price.replace(',', '.').toFloatOrNull() ?: vehicle.price
@@ -1516,12 +1553,17 @@ private fun startTrip(context: Context, prefs: android.content.SharedPreferences
         .putBoolean(KEY_TRIP_ELECTRIC, electric)
         .putFloat(if (electric) KEY_ELECTRIC_CONSUMPTION else KEY_CONSUMPTION, tripConsumption)
         .putFloat(if (electric) KEY_ELECTRIC_PRICE else KEY_PRICE, tripPrice)
+        .putBoolean(KEY_TRACKING_ENABLED, trackingEnabled)
         .putString(KEY_ACTIVE_VEHICLE_ID, vehicle.id).putString(KEY_ACTIVE_VEHICLE_NAME, vehicle.name).putString(KEY_ACTIVE_FUEL_TYPE, vehicle.fuelType)
         .putFloat(KEY_ACTIVE_CONSUMPTION, tripConsumption).putFloat(KEY_ACTIVE_PRICE, tripPrice)
         .putBoolean(KEY_ACTIVE_DEPRECIATION, vehicle.depreciationEnabled).putFloat(KEY_ACTIVE_DEPRECIATION_RATE, vehicle.depreciationPerKm)
         .putString(KEY_NAME, name).putLong(KEY_STARTED_AT, System.currentTimeMillis()).putLong(KEY_STOPPED_AT, 0L).apply()
-    val intent = Intent(context, RouteTrackingService::class.java)
-    ContextCompat.startForegroundService(context, intent)
+    if (trackingEnabled) {
+        val intent = Intent(context, RouteTrackingService::class.java)
+        ContextCompat.startForegroundService(context, intent)
+    } else {
+        context.stopService(Intent(context, RouteTrackingService::class.java))
+    }
 }
 
 @Composable
@@ -1884,10 +1926,12 @@ private fun SettingsTab(
     soundEffects: Boolean,
     shakeToSelect: Boolean,
     timeGreetings: Boolean,
+    trackingNotification: Boolean,
     onThemeChange: (String) -> Unit,
     onSoundChange: (Boolean) -> Unit,
     onShakeChange: (Boolean) -> Unit,
-    onGreetingsChange: (Boolean) -> Unit
+    onGreetingsChange: (Boolean) -> Unit,
+    onTrackingNotificationChange: (Boolean) -> Unit
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = CardSurface), elevation = CardDefaults.cardElevation(2.dp)) {
@@ -1909,6 +1953,8 @@ private fun SettingsTab(
                 SettingToggle("Schudden voor willekeur", "Schud op het startscherm om een opgeslagen rit te kiezen.", shakeToSelect, onShakeChange)
                 HorizontalDivider()
                 SettingToggle("Tijdgebonden begroetingen", "Toon de vroege-vogel- en nachtritmelding.", timeGreetings, onGreetingsChange)
+                HorizontalDivider()
+                SettingToggle("Blijvende trackingmelding", "Toon tijdens GPS-tracking een melding boven in beeld. Uit gebruikt de stilste Android-melding; Android kan een actieve locatie-app nog steeds tonen.", trackingNotification, onTrackingNotificationChange)
             }
         }
         Text("Je instellingen worden automatisch op dit apparaat opgeslagen.", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 4.dp))
