@@ -133,11 +133,12 @@ private const val KEY_ACTIVE_DEPRECIATION = "active_depreciation"
 private const val KEY_ACTIVE_DEPRECIATION_RATE = "active_depreciation_rate"
 private const val KEY_MAINTENANCE_REMINDERS = "maintenance_reminders"
 
-private val Forest = Color(0xFF176DB3)
-private val Ink = Color(0xFF14283F)
-private val Muted = Color(0xFF68798D)
-private val Paper = Color(0xFFF3F7FC)
-private val BlueTint = Color(0xFFE7F1FB)
+private var Forest by mutableStateOf(Color(0xFF176DB3))
+private var Ink by mutableStateOf(Color(0xFF14283F))
+private var Muted by mutableStateOf(Color(0xFF68798D))
+private var Paper by mutableStateOf(Color(0xFFF3F7FC))
+private var BlueTint by mutableStateOf(Color(0xFFE7F1FB))
+private var CardSurface by mutableStateOf(Color.White)
 private const val UPDATE_REPOSITORY = "redglowmk3/vlotrit"
 private const val UPDATE_INSTALL_STATUS_ACTION = "nl.ritbon.app.UPDATE_INSTALL_STATUS"
 
@@ -441,6 +442,12 @@ private fun RitbonApp() {
     var history by remember { mutableStateOf(readHistory(prefs)) }
     var selectedHistoryId by remember { mutableStateOf<Long?>(null) }
     var selectedTab by remember { mutableIntStateOf(if (prefs.getBoolean(KEY_WORKDAY_ACTIVE, false)) 4 else if (prefs.getBoolean(KEY_RUNNING, false) && prefs.getBoolean(KEY_TRIP_ELECTRIC, false)) 1 else 0) }
+    var themeMode by remember { mutableStateOf(prefs.getString("setting_theme", "system") ?: "system") }
+    var soundEffects by remember { mutableStateOf(prefs.getBoolean("setting_sound_effects", true)) }
+    var shakeToSelect by remember { mutableStateOf(prefs.getBoolean("setting_shake_trip", true)) }
+    var timeGreetings by remember { mutableStateOf(prefs.getBoolean("setting_time_greetings", true)) }
+    val systemDark = androidx.compose.foundation.isSystemInDarkTheme()
+    val darkMode = themeMode == "dark" || (themeMode == "system" && systemDark)
     var fuelDepreciation by remember { mutableStateOf(prefs.getBoolean(KEY_FUEL_DEPRECIATION, false)) }
     var electricDepreciation by remember { mutableStateOf(prefs.getBoolean(KEY_ELECTRIC_DEPRECIATION, false)) }
     var depreciationRate by remember { mutableStateOf(prefs.getFloat(KEY_DEPRECIATION_RATE, 0.15f).formatPrice()) }
@@ -459,9 +466,9 @@ private fun RitbonApp() {
     var selectedShakeTrip by remember { mutableStateOf<TripRecord?>(null) }
     var noShakeTrips by remember { mutableStateOf(false) }
     val latestHistory by rememberUpdatedState(history)
-    val openingGreeting = remember {
+    val openingGreeting = remember(timeGreetings) {
         val hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
-        when {
+        if (!timeGreetings) "" else when {
             hour in listOf(23, 0, 1, 2, 3, 4) -> "Nog laat onderweg? Houd je ogen op de weg."
             hour in 5..6 -> "Vroeg uit de veren! De koffie staat hopelijk al klaar."
             else -> ""
@@ -490,14 +497,14 @@ private fun RitbonApp() {
     LaunchedEffect(logoConfettiBurst) {
         if (logoConfettiBurst > 0) {
             showLogoConfetti = true
-            playEasterEggSound()
+            if (soundEffects) playEasterEggSound()
             delay(1800)
             showLogoConfetti = false
         }
     }
 
     DisposableEffect(context, selectedTab, running, workdayActive) {
-        if (selectedTab != 0 || running || workdayActive) {
+        if (selectedTab != 0 || running || workdayActive || !shakeToSelect) {
             onDispose { }
         } else {
             val manager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
@@ -563,7 +570,7 @@ private fun RitbonApp() {
     fun saveVehicleProfile(profile: VehicleProfile) {
         profiles = profiles.filterNot { it.id == profile.id } + profile
         writeVehicleProfiles(prefs, profiles)
-        selectVehicle(profile, navigateToTripTab = selectedTab != 10)
+        selectVehicle(profile, navigateToTripTab = selectedTab !in 10..11)
         if (profile.licensePlate.isNotBlank()) coroutineScope.launch {
             try {
                 val rdw = withContext(Dispatchers.IO) { lookupRdwVehicle(profile.licensePlate) }
@@ -575,7 +582,7 @@ private fun RitbonApp() {
                 )
                 profiles = profiles.map { if (it.id == updated.id) updated else it }
                 writeVehicleProfiles(prefs, profiles)
-                if (selectedVehicleId == updated.id) selectVehicle(updated, navigateToTripTab = selectedTab != 10)
+                if (selectedVehicleId == updated.id) selectVehicle(updated, navigateToTripTab = selectedTab !in 10..11)
                 info = if (rdw.consumption != null) "RDW-testverbruik voor ${profile.licensePlate} ingevuld (${rdw.consumption.formatNl()} ${if (rdw.electric) "kWh/100 km" else "L/100 km"})." else "Kenteken gevonden; RDW heeft geen verbruikswaarde voor dit voertuig."
             } catch (e: Exception) { info = e.message ?: "RDW-gegevens konden niet worden opgehaald." }
         }
@@ -586,7 +593,7 @@ private fun RitbonApp() {
         writeVehicleProfiles(prefs, profiles)
         if (selectedVehicleId == profile.id) {
             val replacement = profiles.first()
-            selectVehicle(replacement, navigateToTripTab = selectedTab != 10)
+            selectVehicle(replacement, navigateToTripTab = selectedTab !in 10..11)
         }
     }
 
@@ -692,13 +699,22 @@ private fun RitbonApp() {
         }
     }
 
-    MaterialTheme(colorScheme = lightColorScheme(primary = Forest, secondary = Color(0xFF39A9D6), background = Paper, surface = Color.White, onSurface = Ink)) {
+    SideEffect {
+        Forest = if (darkMode) Color(0xFF75BEFF) else Color(0xFF176DB3)
+        Ink = if (darkMode) Color(0xFFE7EDF6) else Color(0xFF14283F)
+        Muted = if (darkMode) Color(0xFFA8B5C5) else Color(0xFF68798D)
+        Paper = if (darkMode) Color(0xFF0E1722) else Color(0xFFF3F7FC)
+        BlueTint = if (darkMode) Color(0xFF1B3045) else Color(0xFFE7F1FB)
+        CardSurface = if (darkMode) Color(0xFF172536) else Color.White
+    }
+    MaterialTheme(colorScheme = if (darkMode) darkColorScheme(primary = Forest, secondary = Color(0xFF55B6D9), background = Paper, surface = CardSurface, onSurface = Ink)
+        else lightColorScheme(primary = Forest, secondary = Color(0xFF39A9D6), background = Paper, surface = CardSurface, onSurface = Ink)) {
       ModalNavigationDrawer(drawerState = drawerState, drawerContent = {
           ModalDrawerSheet {
               Text("VLOTRIT", modifier = Modifier.padding(horizontal = 22.dp, vertical = 22.dp), color = Ink, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
               HorizontalDivider()
-              listOf("Brandstof", "EV", "Ritten", "Planner", "Zakelijk", "Inzicht", "Laadbeurten", "Stations", "Onderhoud", "Voertuigen", "Info").forEachIndexed { index, label ->
-                  if (index == 10) HorizontalDivider(Modifier.padding(vertical = 8.dp))
+              listOf("Brandstof", "EV", "Ritten", "Planner", "Zakelijk", "Inzicht", "Laadbeurten", "Stations", "Onderhoud", "Voertuigen", "Instellingen", "Info").forEachIndexed { index, label ->
+                  if (index == 11) HorizontalDivider(Modifier.padding(vertical = 8.dp))
                   NavigationDrawerItem(label = { Text(label) }, selected = selectedTab == index, onClick = {
                       when (index) {
                           0 -> if (running || workdayActive) { if (!prefs.getBoolean(KEY_TRIP_ELECTRIC, false)) selectedTab = 0 } else profiles.firstOrNull { !it.electric }?.let { selectVehicle(it) }
@@ -736,8 +752,8 @@ private fun RitbonApp() {
                     }
                 }
             }
-            if (selectedTab !in 7..10) VehicleProfilesCard(profiles, selectedVehicle.id, enabled = !running && !workdayActive,
-                onSelect = { selectVehicle(it) }, onPlateEasterEgg = { logoConfettiBurst++ }, onHornEasterEgg = { playEasterEggSound(horn = true) })
+            if (selectedTab !in 7..11) VehicleProfilesCard(profiles, selectedVehicle.id, enabled = !running && !workdayActive,
+                onSelect = { selectVehicle(it) }, onPlateEasterEgg = { logoConfettiBurst++ }, onHornEasterEgg = { if (soundEffects) playEasterEggSound(horn = true) })
             HeroBanner(selectedTab, running, gpsError, workdayActive, onTripAction)
             if (selectedTab == 0 && openingGreeting.isNotBlank()) {
                 Card(shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = BlueTint)) {
@@ -748,7 +764,7 @@ private fun RitbonApp() {
                 }
             }
             if (availableRelease != null) {
-                Card(Modifier.fillMaxWidth().clickable { selectedTab = 10 }, shape = RoundedCornerShape(16.dp),
+                Card(Modifier.fillMaxWidth().clickable { selectedTab = 11 }, shape = RoundedCornerShape(16.dp),
                     colors = CardDefaults.cardColors(containerColor = BlueTint)) {
                     Text("Er is een nieuwe update beschikbaar. Werk VLOTRIT bij via het kopje Info om de nieuwe versie te gebruiken.",
                         Modifier.padding(horizontal = 15.dp, vertical = 12.dp), color = Ink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
@@ -865,6 +881,12 @@ private fun RitbonApp() {
                     onSave = ::saveVehicleProfile,
                     onDelete = ::deleteVehicleProfile)
             } else if (selectedTab == 10) {
+                SettingsTab(themeMode, soundEffects, shakeToSelect, timeGreetings,
+                    onThemeChange = { themeMode = it; prefs.edit().putString("setting_theme", it).apply() },
+                    onSoundChange = { soundEffects = it; prefs.edit().putBoolean("setting_sound_effects", it).apply() },
+                    onShakeChange = { shakeToSelect = it; prefs.edit().putBoolean("setting_shake_trip", it).apply() },
+                    onGreetingsChange = { timeGreetings = it; prefs.edit().putBoolean("setting_time_greetings", it).apply() })
+            } else if (selectedTab == 11) {
                 AppInfoTab(context, latestRelease, availableRelease, checkingUpdates) { coroutineScope.launch { checkForAppUpdate() } }
             } else {
             val electricTab = selectedTab == 1
@@ -872,7 +894,7 @@ private fun RitbonApp() {
             val displayedConsumption = if (electricTab) electricConsumption else consumption
             val displayedPrice = if (electricTab) electricPrice else price
             if (workdayActive) {
-                Card(shape = RoundedCornerShape(21.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
+                Card(shape = RoundedCornerShape(21.dp), colors = CardDefaults.cardColors(containerColor = CardSurface), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
                     Column(Modifier.padding(19.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         Text("Zakelijke werkdag actief", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = Ink)
                         Text(if (businessTripActive) "VLOTRIT registreert nu automatisch een zakelijke rit." else "VLOTRIT wacht tot je gaat rijden en bewaart daarna automatisch elke rit.", color = Muted, fontSize = 13.sp)
@@ -880,7 +902,7 @@ private fun RitbonApp() {
                     }
                 }
             } else if (running && activeElectric != electricTab) {
-                Card(shape = RoundedCornerShape(21.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
+                Card(shape = RoundedCornerShape(21.dp), colors = CardDefaults.cardColors(containerColor = CardSurface), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
                     Column(Modifier.padding(19.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         Text(if (activeElectric) "Je EV-rit loopt" else "Je brandstofrit loopt", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = Ink)
                         Text("Stop deze rit op het tabblad ${if (activeElectric) "EV" else "Brandstof"}.", color = Muted, fontSize = 13.sp)
@@ -888,7 +910,7 @@ private fun RitbonApp() {
                     }
                 }
             } else {
-            Card(shape = RoundedCornerShape(21.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
+            Card(shape = RoundedCornerShape(21.dp), colors = CardDefaults.cardColors(containerColor = CardSurface), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
                 Column(Modifier.padding(19.dp), verticalArrangement = Arrangement.spacedBy(13.dp)) {
                     Text(if (electricTab) "EV-rit" else "Brandstofrit", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = Ink)
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -1066,7 +1088,7 @@ private fun TripActionBanner(running: Boolean, gpsError: String, onTripAction: (
                 onClick = onTripAction,
                 modifier = Modifier.fillMaxWidth(.85f).height(54.dp),
                 shape = RoundedCornerShape(50),
-                colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color(0xFF148449)),
+                colors = ButtonDefaults.buttonColors(containerColor = CardSurface, contentColor = Color(0xFF148449)),
                 elevation = ButtonDefaults.buttonElevation(defaultElevation = 2.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
@@ -1094,7 +1116,7 @@ private fun VehicleManagerTab(
     var editor by remember { mutableStateOf<VehicleProfile?>(null) }
     var creating by remember { mutableStateOf(false) }
     var deleteTarget by remember { mutableStateOf<VehicleProfile?>(null) }
-    Card(shape = RoundedCornerShape(21.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(2.dp)) {
+    Card(shape = RoundedCornerShape(21.dp), colors = CardDefaults.cardColors(containerColor = CardSurface), elevation = CardDefaults.cardElevation(2.dp)) {
         Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(11.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                 Column {
@@ -1152,7 +1174,7 @@ private fun VehicleProfilesCard(
         }
     }
     val active = profiles.firstOrNull { it.id == selectedId } ?: profiles.first()
-    Card(shape = RoundedCornerShape(23.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(2.dp)) {
+    Card(shape = RoundedCornerShape(23.dp), colors = CardDefaults.cardColors(containerColor = CardSurface), elevation = CardDefaults.cardElevation(2.dp)) {
         Box {
             Row(Modifier.fillMaxWidth().clickable(enabled = enabled) { menuOpen = true }.padding(15.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                 Box(Modifier.width(104.dp).height(60.dp)) {
@@ -1286,7 +1308,7 @@ private fun BusinessWorkdayCard(
     label: String, startOdometer: String, statusText: String, onLabelChange: (String) -> Unit,
     onStartOdometerChange: (String) -> Unit, onStart: () -> Unit, onStop: () -> Unit
 ) {
-    Card(shape = RoundedCornerShape(21.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
+    Card(shape = RoundedCornerShape(21.dp), colors = CardDefaults.cardColors(containerColor = CardSurface), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
         Column(Modifier.fillMaxWidth().padding(19.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("Zakelijke werkdag", color = Ink, fontWeight = FontWeight.Bold, fontSize = 18.sp)
             if (statusText.isNotBlank()) Text(statusText, color = Forest, fontSize = 12.sp)
@@ -1317,7 +1339,7 @@ private fun UpdateCard(context: Context, prefs: android.content.SharedPreference
     var pendingUpdatePath by remember { mutableStateOf(prefs.getString("pending_update_file", "").orEmpty()) }
     val scope = rememberCoroutineScope()
 
-    Card(shape = RoundedCornerShape(17.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
+    Card(shape = RoundedCornerShape(17.dp), colors = CardDefaults.cardColors(containerColor = CardSurface), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 15.dp, vertical = 11.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -1567,7 +1589,7 @@ private fun ReceiptCard(context: Context, prefs: android.content.SharedPreferenc
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = {
                     shareTrip(context, receiptTrip, receipt)
-                }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Forest)) { Text("↗ Delen", fontWeight = FontWeight.Bold) }
+                }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = CardSurface, contentColor = Forest)) { Text("↗ Delen", fontWeight = FontWeight.Bold) }
             }
         }
     }
@@ -1586,7 +1608,7 @@ private fun InsightsTab(trips: List<TripRecord>) {
     val averageKm = if (trips.isEmpty()) 0f else totalKm / trips.size
 
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
+        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = CardSurface), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
             Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("Totaaloverzicht · alle voertuigen", color = Muted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(9.dp)) {
@@ -1607,7 +1629,7 @@ private fun InsightsTab(trips: List<TripRecord>) {
                 FilterChip(selected = metric == option, onClick = { metric = option }, label = { Text(option) })
             }
         }
-        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
+        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = CardSurface), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 17.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(if (metric == "Kosten") "Kosten per ${range.lowercase(Locale("nl", "NL"))}" else "Kilometers per ${range.lowercase(Locale("nl", "NL"))}", color = Ink, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                 val values = buckets.map { if (metric == "Kosten") it.cost else it.km }
@@ -1668,7 +1690,7 @@ private fun ChargeSessionsTab(prefs: android.content.SharedPreferences, vehicle:
     val totalCost = sessions.filter { it.vehicleId == vehicle.id }.sumOf { it.cost.toDouble() }.toFloat()
 
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
+        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = CardSurface), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
             Column(Modifier.fillMaxWidth().padding(17.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("Nieuwe laadbeurt", color = Ink, fontSize = 17.sp, fontWeight = FontWeight.Bold)
                 Text("Profiel: ${vehicle.name}${if (vehicle.electric) "" else " · kies bovenaan een elektrisch voertuig"}", color = if (vehicle.electric) Muted else Color(0xFF9A5B16), fontSize = 12.sp)
@@ -1699,7 +1721,7 @@ private fun ChargeSessionsTab(prefs: android.content.SharedPreferences, vehicle:
                 if (message.isNotBlank()) Text(message, color = Forest, fontSize = 12.sp)
             }
         }
-        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
+        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = CardSurface), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
             Column(Modifier.fillMaxWidth().padding(17.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                     Text("Laadgeschiedenis · ${vehicle.name}", color = Ink, fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
@@ -1793,7 +1815,7 @@ private fun MaintenanceTab(
             } catch (e: Exception) { lookupStatus = e.message ?: "RDW-gegevens niet bereikbaar. Je kunt de APK-datum handmatig invullen." }
         } else lookupStatus = "Vul bij dit voertuig eerst het kenteken in om de APK via RDW op te zoeken."
     }
-    Card(shape = RoundedCornerShape(21.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
+    Card(shape = RoundedCornerShape(21.dp), colors = CardDefaults.cardColors(containerColor = CardSurface)) {
         Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("Voertuig herinneringen", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Ink)
             Text("Plan APK, onderhoud en bandenwissels op datum of kilometerstand.", color = Muted, fontSize = 13.sp)
@@ -1857,6 +1879,54 @@ private fun MaintenanceTab(
 }
 
 @Composable
+private fun SettingsTab(
+    themeMode: String,
+    soundEffects: Boolean,
+    shakeToSelect: Boolean,
+    timeGreetings: Boolean,
+    onThemeChange: (String) -> Unit,
+    onSoundChange: (Boolean) -> Unit,
+    onShakeChange: (Boolean) -> Unit,
+    onGreetingsChange: (Boolean) -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = CardSurface), elevation = CardDefaults.cardElevation(2.dp)) {
+            Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("Weergave", color = Ink, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                Text("Kies hoe VLOTRIT eruitziet.", color = Muted, fontSize = 13.sp)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("system" to "Automatisch", "light" to "Licht", "dark" to "Donker").forEach { (value, label) ->
+                        FilterChip(selected = themeMode == value, onClick = { onThemeChange(value) }, label = { Text(label) }, modifier = Modifier.weight(1f))
+                    }
+                }
+            }
+        }
+        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = CardSurface), elevation = CardDefaults.cardElevation(2.dp)) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 6.dp)) {
+                Text("Voorkeuren", color = Ink, fontSize = 18.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 12.dp, bottom = 4.dp))
+                SettingToggle("Geluidseffecten", "Schakel de kleine geluidjes van VLOTRIT in of uit.", soundEffects, onSoundChange)
+                HorizontalDivider()
+                SettingToggle("Schudden voor willekeur", "Schud op het startscherm om een opgeslagen rit te kiezen.", shakeToSelect, onShakeChange)
+                HorizontalDivider()
+                SettingToggle("Tijdgebonden begroetingen", "Toon de vroege-vogel- en nachtritmelding.", timeGreetings, onGreetingsChange)
+            }
+        }
+        Text("Je instellingen worden automatisch op dit apparaat opgeslagen.", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 4.dp))
+    }
+}
+
+@Composable
+private fun SettingToggle(title: String, description: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text(title, color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+            Text(description, color = Muted, fontSize = 12.sp, lineHeight = 17.sp)
+        }
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+@Composable
 private fun AppInfoTab(context: Context, latestRelease: AppRelease?, availableRelease: AppRelease?, checkingUpdates: Boolean, onCheckUpdates: () -> Unit) {
     val packageInfo = remember {
         runCatching { context.packageManager.getPackageInfo(context.packageName, 0) }.getOrNull()
@@ -1869,7 +1939,7 @@ private fun AppInfoTab(context: Context, latestRelease: AppRelease?, availableRe
 
     Column(verticalArrangement = Arrangement.spacedBy(13.dp)) {
         UpdateCard(context, context.getSharedPreferences(PREFS, Context.MODE_PRIVATE), latestRelease, availableRelease, checkingUpdates, onCheckUpdates)
-        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Color.White),
+        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = CardSurface),
             elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
             Row(Modifier.fillMaxWidth().padding(18.dp), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -1881,7 +1951,7 @@ private fun AppInfoTab(context: Context, latestRelease: AppRelease?, availableRe
                 }
             }
         }
-        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Color.White),
+        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = CardSurface),
             elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
             Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("Appgegevens", color = Ink, fontWeight = FontWeight.Bold, fontSize = 17.sp)
@@ -1894,7 +1964,7 @@ private fun AppInfoTab(context: Context, latestRelease: AppRelease?, availableRe
                 }
             }
         }
-        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Color.White),
+        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = CardSurface),
             elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
             Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
                 Text("Kaart en prijzen", color = Ink, fontWeight = FontWeight.Bold, fontSize = 16.sp)
@@ -1986,7 +2056,7 @@ private fun StationsTab(context: Context, prefs: android.content.SharedPreferenc
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(13.dp)) {
-        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
+        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = CardSurface), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
             Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("ANWB-gemiddelde E10", color = Muted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -2003,7 +2073,7 @@ private fun StationsTab(context: Context, prefs: android.content.SharedPreferenc
             }
         }
         if (center != null) {
-            Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Color.White),
+            Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = CardSurface),
                 elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
                 Column(Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     StationMap(sortedStations, center!!, hasGpsCenter, Modifier.fillMaxWidth().height(245.dp))
@@ -2035,7 +2105,7 @@ private fun StationsTab(context: Context, prefs: android.content.SharedPreferenc
             val key = "${station.latitude},${station.longitude}"
             val expanded = expandedStation == key
             Card(Modifier.fillMaxWidth().clickable { expandedStation = if (expanded) null else key },
-                shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = Color.White),
+                shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = CardSurface),
                 elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)) {
                 Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Row(horizontalArrangement = Arrangement.spacedBy(11.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -2334,7 +2404,7 @@ private fun RoutePlanner(context: Context, prefs: android.content.SharedPreferen
     val price = (if (electric) electricPrice else fuelPrice).toFloatOrNull() ?: if (electric) 0.30f else 2.092f
     val perKm = consumption * price / 100f
 
-    Card(shape = RoundedCornerShape(21.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
+    Card(shape = RoundedCornerShape(21.dp), colors = CardDefaults.cardColors(containerColor = CardSurface), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
         Column(Modifier.fillMaxWidth().padding(19.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("Route plannen", color = Ink, fontWeight = FontWeight.Bold, fontSize = 18.sp)
             OutlinedTextField(origin, { origin = it; result = null }, modifier = Modifier.fillMaxWidth(), label = { Text("Beginlocatie") }, singleLine = true, shape = RoundedCornerShape(13.dp))
@@ -2451,7 +2521,7 @@ private fun geocodePlace(query: String, near: Pair<Double, Double>? = null): Tri
             Location.distanceBetween(near.first, near.second, candidate.second, candidate.first, result)
             result[0]
         }
-        chosen ?: error("Geen Nederlandse plaats gevonden voor ‘$query’. Voeg eventueel een provincie of land toe.")
+        chosen ?: error("Geen Nederlandse plaats gevonden voor $query. Voeg eventueel een provincie of land toe.")
     } finally { connection.disconnect() }
 }
 
@@ -2480,7 +2550,7 @@ private fun TripHistory(context: Context, prefs: android.content.SharedPreferenc
     val measuredAverage = measuredTrips.takeIf { it.size >= 3 }?.let { group ->
         group.sumOf { it.actualEnergy!!.toDouble() } * 100.0 / group.sumOf { it.distanceKm.toDouble() }
     }?.toFloat()
-    Card(shape = RoundedCornerShape(21.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
+    Card(shape = RoundedCornerShape(21.dp), colors = CardDefaults.cardColors(containerColor = CardSurface), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
         Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -2854,5 +2924,4 @@ private fun Float.euro() = NumberFormat.getCurrencyInstance(Locale("nl", "NL")).
 private fun Date.clock() = SimpleDateFormat("dd-MM HH:mm", Locale("nl", "NL")).format(this)
 private fun Date.dateTime() = SimpleDateFormat("dd-MM-yyyy HH:mm", Locale("nl", "NL")).format(this)
 private fun Long.dateTimeOrUnknown() = if (this > 0L) Date(this).dateTime() else "Niet beschikbaar"
-
 
