@@ -1138,9 +1138,10 @@ private fun BusinessWorkdayCard(
 private data class AppRelease(val versionName: String, val apkUrl: String, val notes: String)
 
 @Composable
-private fun UpdateCard(context: Context, latestRelease: AppRelease?, availableRelease: AppRelease?, checking: Boolean, onCheck: () -> Unit) {
+private fun UpdateCard(context: Context, prefs: android.content.SharedPreferences, latestRelease: AppRelease?, availableRelease: AppRelease?, checking: Boolean, onCheck: () -> Unit) {
     var downloading by remember { mutableStateOf(false) }
     var installStatus by remember { mutableStateOf("") }
+    var pendingUpdatePath by remember { mutableStateOf(prefs.getString("pending_update_file", "").orEmpty()) }
     val scope = rememberCoroutineScope()
 
     Card(shape = RoundedCornerShape(17.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
@@ -1148,25 +1149,32 @@ private fun UpdateCard(context: Context, latestRelease: AppRelease?, availableRe
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text("App updaten", color = Ink, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                    Text(if (checking) "Controleren op nieuwe versies…" else availableRelease?.let { "Versie ${it.versionName} is beschikbaar." } ?: "Je gebruikt de nieuwste versie.",
+                    Text(if (checking) "Controleren op nieuwe versies..." else availableRelease?.let { "Versie ${it.versionName} is beschikbaar." } ?: "Je gebruikt de nieuwste versie.",
                         color = if (availableRelease != null) Forest else Muted, fontSize = 11.sp)
                 }
                 TextButton(enabled = !checking, onClick = onCheck) {
-                    Text(if (checking) "Controleren…" else "Controleer", color = Forest)
+                    Text(if (checking) "Controleren..." else "Controleer", color = Forest)
                 }
             }
             Text("Sinds je laatste update", color = Ink, fontSize = 12.sp, fontWeight = FontWeight.Bold)
             Text(latestRelease?.notes?.takeIf { it.isNotBlank() } ?: "Geen wijzigingsnotities beschikbaar.", color = Muted, fontSize = 11.sp, lineHeight = 16.sp, maxLines = 5)
+            Text("Je downloadt updates via GitHub. Android kan eenmalig toestemming vragen om updates vanuit VLOTRIT te installeren. Play Protect kan daarna een scan aanbieden; laat die beveiliging aan.",
+                color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
             availableRelease?.let { available ->
                 Button(enabled = !downloading, onClick = {
                     scope.launch {
                         downloading = true
                         try {
-                            val file = withContext(Dispatchers.IO) { downloadUpdate(context, available) }
+                            val rememberedFile = pendingUpdatePath.takeIf { it.isNotBlank() }?.let(::File)?.takeIf { it.isFile }
+                            val file = rememberedFile ?: withContext(Dispatchers.IO) { downloadUpdate(context, available) }
                             if (!context.packageManager.canRequestPackageInstalls()) {
+                                pendingUpdatePath = file.absolutePath
+                                prefs.edit().putString("pending_update_file", pendingUpdatePath).apply()
                                 context.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${context.packageName}")))
-                                installStatus = "Sta installatie vanuit VLOTRIT toe en tik daarna opnieuw op installeren."
+                                installStatus = "Sta installatie vanuit VLOTRIT toe en keer daarna hier terug. De APK is bewaard; je hoeft hem niet opnieuw te downloaden."
                             } else {
+                                pendingUpdatePath = ""
+                                prefs.edit().remove("pending_update_file").apply()
                                 withContext(Dispatchers.IO) { installUpdate(context, file) }
                                 installStatus = "Bevestig de update in het Android-installatievenster."
                             }
@@ -1175,7 +1183,7 @@ private fun UpdateCard(context: Context, latestRelease: AppRelease?, availableRe
                         } finally { downloading = false }
                     }
                 }, modifier = Modifier.fillMaxWidth()) {
-                    Text(if (downloading) "Update downloaden…" else "Download en installeer ${available.versionName}")
+                    Text(if (downloading) "Update downloaden..." else if (pendingUpdatePath.isNotBlank()) "Doorgaan met installeren" else "Download en installeer ${available.versionName}")
                 }
             }
             if (installStatus.isNotBlank()) Text(installStatus, color = Muted, fontSize = 11.sp)
@@ -1687,7 +1695,7 @@ private fun AppInfoTab(context: Context, latestRelease: AppRelease?, availableRe
     } ?: "Onbekend"
 
     Column(verticalArrangement = Arrangement.spacedBy(13.dp)) {
-        UpdateCard(context, latestRelease, availableRelease, checkingUpdates, onCheckUpdates)
+        UpdateCard(context, context.getSharedPreferences(PREFS, Context.MODE_PRIVATE), latestRelease, availableRelease, checkingUpdates, onCheckUpdates)
         Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Color.White),
             elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
             Row(Modifier.fillMaxWidth().padding(18.dp), verticalAlignment = Alignment.CenterVertically,
