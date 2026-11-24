@@ -1655,6 +1655,7 @@ private fun AppInfoTab(context: Context) {
                 Text("Kaart en prijzen", color = Ink, fontWeight = FontWeight.Bold, fontSize = 16.sp)
                 Text("Kaartgegevens © OpenStreetMap-bijdragers. Pompprijzen zijn indicatief en kunnen afwijken van de prijs aan de pomp.", color = Muted, fontSize = 12.sp, lineHeight = 17.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = { openExternal(context, "https://openfreemap.org/") }) { Text("OpenFreeMap", color = Forest) }
                     TextButton(onClick = { openExternal(context, "https://www.openstreetmap.org/copyright") }) { Text("OpenStreetMap", color = Forest) }
                     TextButton(onClick = { openExternal(context, "https://hoeveelbenzine.nl/methodologie") }) { Text("Prijsbron", color = Forest) }
                 }
@@ -1997,26 +1998,24 @@ private fun StationMap(stations: List<NearbyStation>, center: Pair<Double, Doubl
             .put("name", station.name).put("kind", station.kind).put("address", station.address).put("details", station.details)
             .put("priceE10", station.priceE10 ?: JSONObject.NULL)) } }.toString()
     }
-    val script = remember(markers, center) {
-        """const stations=$markers,me=[${center.first},${center.second}];
-            const map=L.map('map',{zoomControl:true,scrollWheelZoom:false,preferCanvas:true});
-            const primary=L.tileLayer('https://tile.openstreetmap.de/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'});
-            const fallback=L.tileLayer('https://a.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'});
-            let tileErrors=0,usingFallback=false; primary.on('tileerror',()=>{tileErrors++;if(tileErrors>=2&&!usingFallback){usingFallback=true;map.removeLayer(primary);fallback.addTo(map)}});primary.addTo(map);
-            const points=[L.latLng(me[0],me[1])];
-            L.circleMarker(me,{radius:8,color:'#ffffff',weight:3,fillColor:'#14395f',fillOpacity:1}).bindPopup('Jouw locatie').addTo(map);
-            function safe(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-            stations.forEach(s=>{const p=L.latLng(s.lat,s.lon);points.push(p);const fuel=s.kind==='Tankstation';const marker=L.circleMarker(p,{radius:8,color:'#fff',weight:2,fillColor:fuel?'#ef8a3c':'#1883bd',fillOpacity:1});marker.bindPopup('<b>'+safe(s.name)+'</b><br>'+safe(s.kind)+(s.address?'<br>'+safe(s.address):'')+(s.priceE10?'<br>E10: €'+Number(s.priceE10).toFixed(3)+'/L':'')+(s.details?'<br>'+safe(s.details):''));marker.addTo(map)});
-            if(!hasGpsCenter&&stations.length===0){map.setView(me,7)}else{map.fitBounds(L.latLngBounds(points).pad(0.2),{maxZoom:15})}setTimeout(()=>map.invalidateSize(),250);""".replace("!hasGpsCenter", "!${hasGpsCenter}")
+    val script = remember(markers, center, hasGpsCenter) {
+        """window.initVlotritMap=function(){try{
+            const stations=$markers,me=[${center.first},${center.second}];
+            const map=new maplibregl.Map({container:'map',style:'https://tiles.openfreemap.org/styles/liberty',center:[me[1],me[0]],zoom:10,attributionControl:true});
+            map.addControl(new maplibregl.NavigationControl({showCompass:false}),'top-right');
+            map.on('error',()=>document.getElementById('map-error').style.display='block');
+            const points=[[me[1],me[0]]];
+            new maplibregl.Marker({color:'#14395f'}).setLngLat([me[1],me[0]]).setPopup(new maplibregl.Popup().setText('Jouw locatie')).addTo(map);
+            stations.forEach(s=>{const point=[s.lon,s.lat];points.push(point);const popup=document.createElement('div');popup.textContent=[s.name,s.kind,s.address,s.priceE10?'E10 EUR '+Number(s.priceE10).toFixed(3)+'/L':'',s.details].filter(Boolean).join(' | ');new maplibregl.Marker({color:s.kind==='Tankstation'?'#ef8a3c':'#1883bd'}).setLngLat(point).setPopup(new maplibregl.Popup({offset:24}).setDOMContent(popup)).addTo(map)});
+            map.on('load',()=>{document.getElementById('map-error').style.display='none';if(!${hasGpsCenter}&&stations.length===0)map.setZoom(7);else if(points.length>1){const bounds=points.reduce((b,p)=>b.extend(p),new maplibregl.LngLatBounds(points[0],points[0]));map.fitBounds(bounds,{padding:35,maxZoom:15})}});
+            setTimeout(()=>map.resize(),350);setTimeout(()=>{if(!map.isStyleLoaded())document.getElementById('map-error').style.display='block'},15000);
+        }catch(e){document.getElementById('map-error').style.display='block'}};"""
     }
     MapWebView(script, modifier)
 }
 
-private fun loadMapHtml(context: Context, script: String): String {
-    val css = context.assets.open("leaflet.css").bufferedReader().use { it.readText() }
-    val js = context.assets.open("leaflet.js").bufferedReader().use { it.readText() }
-    return """<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><style>$css html,body,#map{width:100%;height:100%;margin:0;padding:0;background:#eef3f7}body{overflow:hidden}</style></head><body><div id="map"></div><script>$js</script><script>$script</script></body></html>"""
-}
+private fun loadMapHtml(context: Context, script: String): String =
+    """<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.css"><style>html,body,#map{width:100%;height:100%;margin:0;padding:0;background:#eef3f7}body{overflow:hidden}.maplibregl-ctrl-attrib{font:10px sans-serif}#map-error{display:none;position:absolute;z-index:5;left:12px;right:12px;bottom:12px;background:#fff;padding:10px 12px;border-radius:10px;color:#773d2b;font:13px sans-serif;box-shadow:0 2px 8px #0003}</style></head><body><div id="map"></div><div id="map-error">Kaart niet geladen. Controleer je internetverbinding en probeer opnieuw.</div><script>$script</script><script>(function(){const urls=['https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.js','https://cdn.jsdelivr.net/npm/maplibre-gl@5/dist/maplibre-gl.js'];let i=0;function next(){if(i>=urls.length){document.getElementById('map-error').style.display='block';return}const s=document.createElement('script');s.src=urls[i++];s.onload=()=>{if(window.maplibregl)window.initVlotritMap();else next()};s.onerror=next;document.head.appendChild(s)}next()})();</script></body></html>"""
 
 @Composable
 private fun MapWebView(script: String, modifier: Modifier) {
@@ -2028,14 +2027,14 @@ private fun MapWebView(script: String, modifier: Modifier) {
             settings.domStorageEnabled = true
             settings.cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
             val webViewAgent = android.webkit.WebSettings.getDefaultUserAgent(ctx)
-            settings.userAgentString = "$webViewAgent VLOTRIT/1.21 (+https://github.com/Redglowmk3/vlotrit)"
+            settings.userAgentString = "$webViewAgent VLOTRIT/1.27 (+https://github.com/Redglowmk3/vlotrit)"
             webViewClient = WebViewClient()
             setBackgroundColor(android.graphics.Color.rgb(238, 243, 247))
         }
     }, update = { web ->
         if (web.tag != script) {
             web.tag = script
-            web.loadDataWithBaseURL("https://tile.openstreetmap.de/", html, "text/html", "UTF-8", null)
+            web.loadDataWithBaseURL("https://tiles.openfreemap.org/", html, "text/html", "UTF-8", null)
         }
     })
 }
@@ -2128,11 +2127,14 @@ private fun RoutePlanner(context: Context, prefs: android.content.SharedPreferen
 }
 
 private fun fetchPlannedRoute(origin: String, via: List<String>, destination: String, roundTrip: Boolean): PlannedRoute {
-    val searches = listOf(origin) + via + destination + if (roundTrip) listOf(origin) else emptyList()
-    val locations = searches.mapIndexed { index, query ->
+    val searches = listOf(origin) + via + destination
+    val locations = mutableListOf<Triple<Double, Double, String>>()
+    searches.forEachIndexed { index, query ->
         if (index > 0) Thread.sleep(1100)
-        geocodePlace(query)
+        val previous = locations.lastOrNull()?.let { it.second to it.first }
+        locations += geocodePlace(query, previous)
     }
+    if (roundTrip) locations += locations.first()
     val coordinates = locations.joinToString(";") { "${it.first},${it.second}" }
     val url = URL("https://router.project-osrm.org/route/v1/driving/$coordinates?overview=full&geometries=geojson")
     val response = (url.openConnection() as HttpURLConnection).apply {
@@ -2153,16 +2155,30 @@ private fun fetchPlannedRoute(origin: String, via: List<String>, destination: St
     } finally { response.disconnect() }
 }
 
-private fun geocodePlace(query: String): Triple<Double, Double, String> {
-    val encoded = java.net.URLEncoder.encode(query, "UTF-8")
-    val url = URL("https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=$encoded")
+private fun geocodePlace(query: String, near: Pair<Double, Double>? = null): Triple<Double, Double, String> {
+    val explicitCountry = Regex("(?i)(Nederland|Netherlands|Duitsland|Germany|Belgi[eë]|Belgium|Frankrijk|France|Luxemburg|Luxembourg|\\bDE\\b|\\bBE\\b|\\bFR\\b|\\bLU\\b)").containsMatchIn(query)
+    val localQuery = if (explicitCountry) query else "$query, Nederland"
+    val encoded = java.net.URLEncoder.encode(localQuery, "UTF-8")
+    val countryFilter = if (explicitCountry && !Regex("(?i)(Nederland|Netherlands)").containsMatchIn(query)) "" else "&countrycodes=nl"
+    val url = URL("https://nominatim.openstreetmap.org/search?format=jsonv2&limit=20&addressdetails=1&accept-language=nl$countryFilter&q=$encoded")
     val connection = (url.openConnection() as HttpURLConnection).apply {
-        connectTimeout = 12000; readTimeout = 12000; setRequestProperty("User-Agent", "Vlotrit Android personal route planner")
+        connectTimeout = 12000; readTimeout = 12000
+        setRequestProperty("User-Agent", "VLOTRIT Android/1.27 (https://github.com/Redglowmk3/vlotrit)")
+        setRequestProperty("Accept", "application/json")
     }
     return try {
         val results = JSONArray(connection.inputStream.bufferedReader().use { it.readText() })
-        val first = results.optJSONObject(0) ?: error("Locatie niet gevonden: $query")
-        Triple(first.getDouble("lon"), first.getDouble("lat"), first.optString("display_name", query))
+        val candidates = (0 until results.length()).mapNotNull { index ->
+            val candidate = results.optJSONObject(index) ?: return@mapNotNull null
+            val lon = candidate.optDouble("lon", Double.NaN); val lat = candidate.optDouble("lat", Double.NaN)
+            if (!lon.isFinite() || !lat.isFinite()) null else Triple(lon, lat, candidate.optString("display_name", query))
+        }
+        val chosen = if (near == null) candidates.firstOrNull() else candidates.minByOrNull { candidate ->
+            val result = FloatArray(1)
+            Location.distanceBetween(near.first, near.second, candidate.second, candidate.first, result)
+            result[0]
+        }
+        chosen ?: error("Geen Nederlandse plaats gevonden voor ‘$query’. Voeg eventueel een provincie of land toe.")
     } finally { connection.disconnect() }
 }
 
@@ -2518,17 +2534,15 @@ private fun RouteMap(route: String, modifier: Modifier = Modifier) {
     }
     val routeJson = remember(points) { JSONArray().apply { points.forEach { put(JSONArray().put(it.first).put(it.second)) } }.toString() }
     val script = remember(routeJson) {
-        """const pts=$routeJson, map=L.map('map',{zoomControl:true,scrollWheelZoom:false});
-           const primary=L.tileLayer('https://tile.openstreetmap.de/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'});
-           const fallback=L.tileLayer('https://a.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'});
-           let errors=0,switched=false;primary.on('tileerror',()=>{if(++errors>=2&&!switched){switched=true;map.removeLayer(primary);fallback.addTo(map)}});primary.addTo(map);
-           if(pts.length){const latlngs=pts.map(p=>L.latLng(p[0],p[1]));L.polyline(latlngs,{color:'#176b4b',weight:6,opacity:.95}).addTo(map);
-             L.circleMarker(latlngs[0],{radius:8,color:'#fff',weight:3,fillColor:'#176b4b',fillOpacity:1}).bindPopup('Start').addTo(map);
-             if(latlngs.length>1)L.circleMarker(latlngs[latlngs.length-1],{radius:8,color:'#fff',weight:3,fillColor:'#e4774d',fillOpacity:1}).bindPopup('Einde').addTo(map);
-             map.fitBounds(L.latLngBounds(latlngs).pad(.18),{maxZoom:15});}else{map.setView([52.1326,5.2913],7)}setTimeout(()=>map.invalidateSize(),250);"""
+        """window.initVlotritMap=function(){try{
+           const pts=$routeJson,map=new maplibregl.Map({container:'map',style:'https://tiles.openfreemap.org/styles/liberty',center:[5.2913,52.1326],zoom:7,attributionControl:true});
+           map.addControl(new maplibregl.NavigationControl({showCompass:false}),'top-right');map.on('error',()=>document.getElementById('map-error').style.display='block');
+           map.on('load',()=>{document.getElementById('map-error').style.display='none';if(pts.length){const coords=pts.map(p=>[p[1],p[0]]);map.addSource('route',{type:'geojson',data:{type:'Feature',properties:{},geometry:{type:'LineString',coordinates:coords}}});map.addLayer({id:'route-casing',type:'line',source:'route',layout:{'line-cap':'round','line-join':'round'},paint:{'line-color':'#ffffff','line-width':9}});map.addLayer({id:'route-line',type:'line',source:'route',layout:{'line-cap':'round','line-join':'round'},paint:{'line-color':'#176b4b','line-width':5}});new maplibregl.Marker({color:'#176b4b'}).setLngLat(coords[0]).setPopup(new maplibregl.Popup().setText('Start')).addTo(map);if(coords.length>1)new maplibregl.Marker({color:'#e4774d'}).setLngLat(coords[coords.length-1]).setPopup(new maplibregl.Popup().setText('Einde')).addTo(map);if(coords.length>1){const bounds=coords.reduce((b,p)=>b.extend(p),new maplibregl.LngLatBounds(coords[0],coords[0]));map.fitBounds(bounds,{padding:30,maxZoom:15})}}});setTimeout(()=>map.resize(),350);setTimeout(()=>{if(!map.isStyleLoaded())document.getElementById('map-error').style.display='block'},15000);
+           }catch(e){document.getElementById('map-error').style.display='block'}};"""
     }
     MapWebView(script, modifier)
 }
+
 private fun routeEndpoints(route: String): Pair<Pair<Double, Double>?, Pair<Double, Double>?> {
     val points = route.split(';').mapNotNull { point ->
         val values = point.split(',')
