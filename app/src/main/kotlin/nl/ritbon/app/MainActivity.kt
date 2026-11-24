@@ -32,6 +32,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.webkit.JavascriptInterface
 import android.text.Html
+import android.widget.Toast
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -474,6 +475,18 @@ private fun RitbonApp() {
     var latestRelease by remember { mutableStateOf<AppRelease?>(null) }
     var availableRelease by remember { mutableStateOf<AppRelease?>(null) }
     var checkingUpdates by remember { mutableStateOf(false) }
+    var updateNotifications by remember { mutableStateOf(prefs.getBoolean("setting_update_notifications", false)) }
+    val updateNotificationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            updateNotifications = true
+            prefs.edit().putBoolean("setting_update_notifications", true).apply()
+            availableRelease?.let { postUpdateAvailableNotification(context, prefs, it) }
+        } else {
+            updateNotifications = false
+            prefs.edit().putBoolean("setting_update_notifications", false).apply()
+            Toast.makeText(context, "Sta VLOTRIT-meldingen toe om updatewaarschuwingen te ontvangen.", Toast.LENGTH_LONG).show()
+        }
+    }
     var logoConfettiBurst by remember { mutableIntStateOf(0) }
     var showLogoConfetti by remember { mutableStateOf(false) }
     var showFreeFuelDialog by remember { mutableStateOf(false) }
@@ -502,6 +515,7 @@ private fun RitbonApp() {
             val latest = withContext(Dispatchers.IO) { fetchLatestRelease(UPDATE_REPOSITORY, currentVersion) }
             latestRelease = latest
             availableRelease = latest.takeIf { compareVersionNames(it.versionName, currentVersion) > 0 }
+            availableRelease?.let { postUpdateAvailableNotification(context, prefs, it) }
         } catch (_: Exception) {
             latestRelease = null
             availableRelease = null
@@ -955,7 +969,7 @@ private fun RitbonApp() {
                     onSave = ::saveVehicleProfile,
                     onDelete = ::deleteVehicleProfile)
             } else if (selectedTab == 10) {
-                SettingsTab(themeMode, soundEffects, shakeToSelect, timeGreetings, trackingNotification,
+                SettingsTab(themeMode, soundEffects, shakeToSelect, timeGreetings, trackingNotification, updateNotifications,
                     onThemeChange = { themeMode = it; prefs.edit().putString("setting_theme", it).apply() },
                     onSoundChange = { soundEffects = it; prefs.edit().putBoolean("setting_sound_effects", it).apply() },
                     onShakeChange = { shakeToSelect = it; prefs.edit().putBoolean("setting_shake_trip", it).apply() },
@@ -963,6 +977,16 @@ private fun RitbonApp() {
                     onTrackingNotificationChange = {
                         trackingNotification = it
                         prefs.edit().putBoolean("setting_tracking_notification", it).apply()
+                    },
+                    onUpdateNotificationChange = { enabled ->
+                        if (enabled && Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                            updateNotificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        } else {
+                            updateNotifications = enabled
+                            prefs.edit().putBoolean("setting_update_notifications", enabled).apply()
+                            if (enabled) availableRelease?.let { postUpdateAvailableNotification(context, prefs, it) }
+                            else context.getSystemService(NotificationManager::class.java).cancel(UPDATE_NOTIFICATION_ID)
+                        }
                     })
             } else if (selectedTab == 11) {
                 AppInfoTab(context, latestRelease, availableRelease, checkingUpdates) { coroutineScope.launch { checkForAppUpdate() } }
@@ -1591,6 +1615,34 @@ class UpdateInstallReceiver : BroadcastReceiver() {
     }
 }
 
+private const val UPDATE_NOTIFICATION_CHANNEL = "vlotrit_update_alerts"
+private const val UPDATE_NOTIFICATION_ID = 22
+
+private fun postUpdateAvailableNotification(context: Context, prefs: android.content.SharedPreferences, release: AppRelease) {
+    if (!prefs.getBoolean("setting_update_notifications", false)) return
+    if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
+    if (prefs.getString("update_notification_version", "") == release.versionName) return
+    val manager = context.getSystemService(NotificationManager::class.java)
+    if (Build.VERSION.SDK_INT >= 26) {
+        manager.createNotificationChannel(NotificationChannel(UPDATE_NOTIFICATION_CHANNEL, "App-updates", NotificationManager.IMPORTANCE_DEFAULT).apply {
+            description = "Meldingen wanneer een nieuwe VLOTRIT-versie beschikbaar is."
+        })
+    }
+    val openApp = PendingIntent.getActivity(context, UPDATE_NOTIFICATION_ID,
+        Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+    val notification = NotificationCompat.Builder(context, UPDATE_NOTIFICATION_CHANNEL)
+        .setSmallIcon(android.R.drawable.stat_sys_download_done)
+        .setContentTitle("VLOTRIT ${release.versionName} is beschikbaar")
+        .setContentText("Tik om VLOTRIT te openen en de update te bekijken.")
+        .setContentIntent(openApp)
+        .setAutoCancel(true)
+        .setOnlyAlertOnce(true)
+        .build()
+    runCatching { manager.notify(UPDATE_NOTIFICATION_ID, notification) }
+        .onSuccess { prefs.edit().putString("update_notification_version", release.versionName).apply() }
+}
+
 fun ensureTrackingNotificationChannels(context: Context) {
     if (Build.VERSION.SDK_INT >= 26) {
         val manager = context.getSystemService(NotificationManager::class.java)
@@ -2025,11 +2077,13 @@ private fun SettingsTab(
     shakeToSelect: Boolean,
     timeGreetings: Boolean,
     trackingNotification: Boolean,
+    updateNotifications: Boolean,
     onThemeChange: (String) -> Unit,
     onSoundChange: (Boolean) -> Unit,
     onShakeChange: (Boolean) -> Unit,
     onGreetingsChange: (Boolean) -> Unit,
-    onTrackingNotificationChange: (Boolean) -> Unit
+    onTrackingNotificationChange: (Boolean) -> Unit,
+    onUpdateNotificationChange: (Boolean) -> Unit
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = CardSurface), elevation = CardDefaults.cardElevation(2.dp)) {
@@ -2053,6 +2107,8 @@ private fun SettingsTab(
                 SettingToggle("Tijdgebonden begroetingen", "Toon de vroege-vogel- en nachtritmelding.", timeGreetings, onGreetingsChange)
                 HorizontalDivider()
                 SettingToggle("Standaard ritmelding", "Standaard voor nieuwe ritten. Je kunt de melding per rit nog aanpassen vóór je start.", trackingNotification, onTrackingNotificationChange)
+                HorizontalDivider()
+                SettingToggle("Melding bij nieuwe update", "Stuur een Android-melding wanneer een nieuwere VLOTRIT-versie beschikbaar is. Staat standaard uit.", updateNotifications, onUpdateNotificationChange)
             }
         }
         Text("Je instellingen worden automatisch op dit apparaat opgeslagen.", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 4.dp))
