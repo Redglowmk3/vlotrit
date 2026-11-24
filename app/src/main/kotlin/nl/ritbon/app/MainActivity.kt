@@ -3,6 +3,9 @@ package nl.ritbon.app
 import android.Manifest
 import android.app.PendingIntent
 import android.app.DatePickerDialog
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -67,6 +70,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -100,6 +104,7 @@ const val KEY_ROUTE = "route_points"
 const val KEY_GPS_ERROR = "gps_error"
 const val KEY_RUNNING = "running"
 const val KEY_TRACKING_ENABLED = "trip_tracking_enabled"
+const val KEY_ACTIVE_TRACKING_NOTIFICATION = "active_tracking_notification"
 const val KEY_CONSUMPTION = "consumption"
 const val KEY_PRICE = "price"
 const val KEY_NAME = "trip_name"
@@ -124,6 +129,9 @@ const val KEY_BUSINESS_LAST_MOVING_AT = "business_last_moving_at"
 const val ACTION_START_WORKDAY = "nl.ritbon.app.START_WORKDAY"
 const val ACTION_STOP_WORKDAY = "nl.ritbon.app.STOP_WORKDAY"
 const val ACTION_REFRESH_TRACKING_NOTIFICATION = "nl.ritbon.app.REFRESH_TRACKING_NOTIFICATION"
+const val TRACKING_NOTIFICATION_CHANNEL = "vlotrit_tracking_visible"
+const val QUIET_TRACKING_NOTIFICATION_CHANNEL = "vlotrit_tracking_quiet"
+const val TRACKING_NOTIFICATION_ID = 21
 private const val KEY_VEHICLES = "vehicle_profiles"
 private const val KEY_SELECTED_VEHICLE = "selected_vehicle"
 private const val KEY_ACTIVE_VEHICLE_ID = "active_vehicle_id"
@@ -435,6 +443,8 @@ private fun RitbonApp() {
     var tripName by remember { mutableStateOf(prefs.getString(KEY_NAME, "").orEmpty()) }
     var running by remember { mutableStateOf(prefs.getBoolean(KEY_RUNNING, false)) }
     var showTripStartDialog by remember { mutableStateOf(false) }
+    var tripNotificationChoice by remember { mutableStateOf(prefs.getBoolean("setting_tracking_notification", true)) }
+    var pendingTripTracking by remember { mutableStateOf(true) }
     var workdayActive by remember { mutableStateOf(prefs.getBoolean(KEY_WORKDAY_ACTIVE, false)) }
     var businessTripActive by remember { mutableStateOf(prefs.getBoolean(KEY_BUSINESS_TRIP_ACTIVE, false)) }
     var businessLabel by remember { mutableStateOf(prefs.getString(KEY_BUSINESS_LABEL, "").orEmpty()) }
@@ -619,12 +629,16 @@ private fun RitbonApp() {
             } else info = "Zakelijk registreren heeft locatietoegang nodig."
         } else {
             val isElectric = selectedTab == 1
+            val trackingRequested = pendingTripTracking
+            val actualTracking = trackingRequested && ok
             startTrip(context, prefs, startOdo, if (isElectric) electricConsumption else consumption,
-                if (isElectric) electricPrice else price, tripName, isElectric, selectedVehicle, trackingEnabled = grants[Manifest.permission.ACCESS_FINE_LOCATION] == true || grants[Manifest.permission.ACCESS_COARSE_LOCATION] == true)
+                if (isElectric) electricPrice else price, tripName, isElectric, selectedVehicle, trackingEnabled = actualTracking, notificationEnabled = tripNotificationChoice)
             running = true
-            if (!ok) info = "Geen locatietoegang: vul de gereden afstand handmatig in."
-            else if (Build.VERSION.SDK_INT >= 33 && grants[Manifest.permission.POST_NOTIFICATIONS] == false) info = "Rit gestart. Sta VLOTRIT-meldingen toe in Android-instellingen om de trackingmelding bovenin te zien."
+            if (!trackingRequested) info = "Rit gestart zonder GPS. Je kunt de afstand zelf invullen."
+            else if (!ok) info = "Geen locatietoegang: vul de gereden afstand handmatig in."
+            else if (tripNotificationChoice && Build.VERSION.SDK_INT >= 33 && grants[Manifest.permission.POST_NOTIFICATIONS] == false && ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) info = "Rit gestart. Sta VLOTRIT-meldingen toe in Android-instellingen om de ritmelding bovenin te zien."
             else if (grants[Manifest.permission.ACCESS_FINE_LOCATION] != true) info = "Voor een nauwkeurige route: kies bij Locatietoegang voor Precieze locatie."
+            pendingTripTracking = true
         }
     }
 
@@ -664,25 +678,33 @@ private fun RitbonApp() {
         if (trackGps) {
             val fine = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
             val coarse = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
-            val notificationAllowed = Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+            val notificationAllowed = !tripNotificationChoice || Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
             if ((fine || coarse) && notificationAllowed) {
-                startTrip(context, prefs, startOdo, consumptionValue, priceValue, tripName, electricTab, selectedVehicle, trackingEnabled = true)
+                startTrip(context, prefs, startOdo, consumptionValue, priceValue, tripName, electricTab, selectedVehicle, trackingEnabled = true, notificationEnabled = tripNotificationChoice)
                 running = true
             } else {
                 val permissions = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
-                if (Build.VERSION.SDK_INT >= 33) permissions.add(Manifest.permission.POST_NOTIFICATIONS)
+                pendingTripTracking = true
+                if (tripNotificationChoice && Build.VERSION.SDK_INT >= 33) permissions.add(Manifest.permission.POST_NOTIFICATIONS)
                 permissionLauncher.launch(permissions.toTypedArray())
             }
         } else {
-            startTrip(context, prefs, startOdo, consumptionValue, priceValue, tripName, electricTab, selectedVehicle, trackingEnabled = false)
-            running = true
-            info = "Rit gestart zonder GPS. Je kunt de afstand zelf invullen."
+            val notificationAllowed = Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+            if (tripNotificationChoice && !notificationAllowed) {
+                pendingTripTracking = false
+                permissionLauncher.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
+            } else {
+                startTrip(context, prefs, startOdo, consumptionValue, priceValue, tripName, electricTab, selectedVehicle, trackingEnabled = false, notificationEnabled = tripNotificationChoice)
+                running = true
+                info = if (tripNotificationChoice) "Rit gestart zonder GPS. Je kunt de afstand zelf invullen." else "Rit gestart zonder GPS of melding. Je kunt de afstand zelf invullen."
+            }
         }
     }
 
     val onTripAction: () -> Unit = {
         val electricTab = selectedTab == 1
         if (!running) {
+            tripNotificationChoice = prefs.getBoolean("setting_tracking_notification", true)
             showTripStartDialog = true
         } else {
             val km = (distance.toFloatOrNull() ?: 0f).coerceAtLeast(0f)
@@ -715,7 +737,9 @@ private fun RitbonApp() {
                 .putFloat(KEY_LAST_ODO, endOdo).putFloat(if (tripIsElectric) KEY_ELECTRIC_CONSUMPTION else KEY_CONSUMPTION, tripConsumption)
                 .putFloat(if (tripIsElectric) KEY_ELECTRIC_PRICE else KEY_PRICE, tripPrice).putString(KEY_NAME, tripName)
                 .putLong(KEY_STOPPED_AT, stoppedAt).apply()
-            context.stopService(Intent(context, RouteTrackingService::class.java)); running = false
+            context.stopService(Intent(context, RouteTrackingService::class.java))
+            context.getSystemService(NotificationManager::class.java).cancel(TRACKING_NOTIFICATION_ID)
+            running = false
             startOdo = endOdo.formatInput(); info = "Eindstand ${endOdo.formatNl()} km opgeslagen als je volgende beginstand."
             val localStop = java.util.Calendar.getInstance().apply { timeInMillis = stoppedAt }
             if ((localStop.get(java.util.Calendar.HOUR_OF_DAY) == 23 && localStop.get(java.util.Calendar.MINUTE) >= 30) || localStop.get(java.util.Calendar.HOUR_OF_DAY) in 0..4) showGoodNightDialog = true
@@ -796,7 +820,18 @@ private fun RitbonApp() {
             if (showTripStartDialog) AlertDialog(
                 onDismissRequest = { showTripStartDialog = false },
                 title = { Text("Rit starten") },
-                text = { Text("Wil je de route met GPS laten opnemen? Zonder GPS kun je de gereden afstand tijdens de rit zelf invullen.") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("Wil je de route met GPS laten opnemen? Zonder GPS kun je de gereden afstand tijdens de rit zelf invullen.")
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Column(Modifier.weight(1f)) {
+                                Text("Melding tijdens deze rit", color = Ink, fontWeight = FontWeight.SemiBold)
+                                Text("Toont ritnaam, voertuig en gereden kilometers.", color = Muted, fontSize = 12.sp)
+                            }
+                            Switch(checked = tripNotificationChoice, onCheckedChange = { tripNotificationChoice = it })
+                        }
+                    }
+                },
                 confirmButton = { TextButton(onClick = { showTripStartDialog = false; beginSelectedTrip(trackGps = true) }) { Text("Start met GPS") } },
                 dismissButton = { TextButton(onClick = { showTripStartDialog = false; beginSelectedTrip(trackGps = false) }) { Text("Start zonder GPS") } }
             )
@@ -919,9 +954,6 @@ private fun RitbonApp() {
                     onTrackingNotificationChange = {
                         trackingNotification = it
                         prefs.edit().putBoolean("setting_tracking_notification", it).apply()
-                        if (running && prefs.getBoolean(KEY_TRACKING_ENABLED, false)) {
-                            context.startService(Intent(context, RouteTrackingService::class.java).setAction(ACTION_REFRESH_TRACKING_NOTIFICATION))
-                        }
                     })
             } else if (selectedTab == 11) {
                 AppInfoTab(context, latestRelease, availableRelease, checkingUpdates) { coroutineScope.launch { checkForAppUpdate() } }
@@ -954,7 +986,13 @@ private fun RitbonApp() {
                         NumericField("Beginstand", startOdo, { startOdo = it }, "km", Modifier.weight(1f), enabled = !running)
                         NumericField("Eindstand", if (running) "—" else if (endOdo > 0f) endOdo.formatInput() else "—", {}, "km", Modifier.weight(1f), enabled = false)
                     }
-                    NumericField("Gereden afstand · GPS of handmatig", distance, { distance = it; if (running) prefs.edit().putFloat(KEY_TRACKED_KM, it.toFloatOrNull() ?: 0f).apply() }, "km", Modifier.fillMaxWidth(), enabled = true)
+                    NumericField("Gereden afstand · GPS of handmatig", distance, {
+                        distance = it
+                        if (running) {
+                            prefs.edit().putFloat(KEY_TRACKED_KM, it.toFloatOrNull() ?: 0f).apply()
+                            if (!prefs.getBoolean(KEY_TRACKING_ENABLED, false)) publishActiveTripNotification(context, prefs)
+                        }
+                    }, "km", Modifier.fillMaxWidth(), enabled = true)
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         NumericField(if (electricTab) "Gemiddeld stroomverbruik" else "Gemiddeld verbruik", displayedConsumption,
                             { value ->
@@ -1544,7 +1582,55 @@ class UpdateInstallReceiver : BroadcastReceiver() {
     }
 }
 
-private fun startTrip(context: Context, prefs: android.content.SharedPreferences, startText: String, consumption: String, price: String, name: String, electric: Boolean, vehicle: VehicleProfile, trackingEnabled: Boolean = true) {
+fun ensureTrackingNotificationChannels(context: Context) {
+    if (Build.VERSION.SDK_INT >= 26) {
+        val manager = context.getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(NotificationChannel(TRACKING_NOTIFICATION_CHANNEL, "Ritmelding", NotificationManager.IMPORTANCE_LOW).apply {
+            description = "Ritstatus en kilometerstand tijdens het rijden."
+        })
+        manager.createNotificationChannel(NotificationChannel(QUIET_TRACKING_NOTIFICATION_CHANNEL, "Ritmelding (stil)", NotificationManager.IMPORTANCE_MIN).apply {
+            description = "Minimale melding voor een actieve rit."
+        })
+    }
+}
+
+fun buildActiveTripNotification(context: Context, prefs: android.content.SharedPreferences): Notification {
+    val workday = prefs.getBoolean(KEY_WORKDAY_ACTIVE, false)
+    val running = prefs.getBoolean(KEY_RUNNING, false)
+    val notificationOn = if (running) prefs.getBoolean(KEY_ACTIVE_TRACKING_NOTIFICATION, prefs.getBoolean("setting_tracking_notification", true))
+        else prefs.getBoolean("setting_tracking_notification", true)
+    val km = prefs.getFloat(KEY_TRACKED_KM, 0f)
+    val tripName = prefs.getString(KEY_NAME, "").orEmpty().ifBlank { "Rit" }
+    val vehicle = prefs.getString(KEY_ACTIVE_VEHICLE_NAME, "").orEmpty()
+    val contentIntent = PendingIntent.getActivity(
+        context, 0, Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
+    val tracking = prefs.getBoolean(KEY_TRACKING_ENABLED, true)
+    val detail = when {
+        workday -> "Werkdag actief · ritten worden bijgehouden"
+        tracking -> "GPS-route · ${km.formatNl()} km gereden${vehicle.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()}"
+        else -> "Handmatige rit · ${km.formatNl()} km${vehicle.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()}"
+    }
+    return NotificationCompat.Builder(context, if (notificationOn) TRACKING_NOTIFICATION_CHANNEL else QUIET_TRACKING_NOTIFICATION_CHANNEL)
+        .setSmallIcon(android.R.drawable.ic_menu_mylocation)
+        .setContentTitle(if (workday) "VLOTRIT · zakelijke werkdag" else "VLOTRIT · $tripName")
+        .setContentText(detail)
+        .setContentIntent(contentIntent)
+        .setCategory(NotificationCompat.CATEGORY_NAVIGATION)
+        .setOnlyAlertOnce(true)
+        .setOngoing(true)
+        .build()
+}
+
+private fun publishActiveTripNotification(context: Context, prefs: android.content.SharedPreferences) {
+    if (prefs.getBoolean(KEY_ACTIVE_TRACKING_NOTIFICATION, prefs.getBoolean("setting_tracking_notification", true))) {
+        ensureTrackingNotificationChannels(context)
+        runCatching { context.getSystemService(NotificationManager::class.java).notify(TRACKING_NOTIFICATION_ID, buildActiveTripNotification(context, prefs)) }
+    }
+}
+
+private fun startTrip(context: Context, prefs: android.content.SharedPreferences, startText: String, consumption: String, price: String, name: String, electric: Boolean, vehicle: VehicleProfile, trackingEnabled: Boolean = true, notificationEnabled: Boolean = prefs.getBoolean("setting_tracking_notification", true)) {
     val start = startText.toFloatOrNull() ?: prefs.getFloat(KEY_LAST_ODO, 0f)
     val tripConsumption = consumption.replace(',', '.').toFloatOrNull() ?: vehicle.consumption
     val tripPrice = price.replace(',', '.').toFloatOrNull() ?: vehicle.price
@@ -1554,6 +1640,7 @@ private fun startTrip(context: Context, prefs: android.content.SharedPreferences
         .putFloat(if (electric) KEY_ELECTRIC_CONSUMPTION else KEY_CONSUMPTION, tripConsumption)
         .putFloat(if (electric) KEY_ELECTRIC_PRICE else KEY_PRICE, tripPrice)
         .putBoolean(KEY_TRACKING_ENABLED, trackingEnabled)
+        .putBoolean(KEY_ACTIVE_TRACKING_NOTIFICATION, notificationEnabled)
         .putString(KEY_ACTIVE_VEHICLE_ID, vehicle.id).putString(KEY_ACTIVE_VEHICLE_NAME, vehicle.name).putString(KEY_ACTIVE_FUEL_TYPE, vehicle.fuelType)
         .putFloat(KEY_ACTIVE_CONSUMPTION, tripConsumption).putFloat(KEY_ACTIVE_PRICE, tripPrice)
         .putBoolean(KEY_ACTIVE_DEPRECIATION, vehicle.depreciationEnabled).putFloat(KEY_ACTIVE_DEPRECIATION_RATE, vehicle.depreciationPerKm)
@@ -1563,6 +1650,8 @@ private fun startTrip(context: Context, prefs: android.content.SharedPreferences
         ContextCompat.startForegroundService(context, intent)
     } else {
         context.stopService(Intent(context, RouteTrackingService::class.java))
+        if (notificationEnabled) publishActiveTripNotification(context, prefs)
+        else context.getSystemService(NotificationManager::class.java).cancel(TRACKING_NOTIFICATION_ID)
     }
 }
 
@@ -1954,7 +2043,7 @@ private fun SettingsTab(
                 HorizontalDivider()
                 SettingToggle("Tijdgebonden begroetingen", "Toon de vroege-vogel- en nachtritmelding.", timeGreetings, onGreetingsChange)
                 HorizontalDivider()
-                SettingToggle("Blijvende trackingmelding", "Toon tijdens GPS-tracking een melding boven in beeld. Uit gebruikt de stilste Android-melding; Android kan een actieve locatie-app nog steeds tonen.", trackingNotification, onTrackingNotificationChange)
+                SettingToggle("Standaard ritmelding", "Standaard voor nieuwe ritten. Je kunt de melding per rit nog aanpassen vóór je start.", trackingNotification, onTrackingNotificationChange)
             }
         }
         Text("Je instellingen worden automatisch op dit apparaat opgeslagen.", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 4.dp))
