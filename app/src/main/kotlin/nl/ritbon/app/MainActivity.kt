@@ -56,10 +56,12 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 import java.text.NumberFormat
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.abs
 import java.time.Instant
 import java.time.LocalDate
 import java.time.YearMonth
@@ -128,7 +130,8 @@ internal data class VehicleProfile(
     val consumption: Float,
     val price: Float,
     val depreciationPerKm: Float,
-    val depreciationEnabled: Boolean
+    val depreciationEnabled: Boolean,
+    val licensePlate: String = ""
 ) {
     val electric get() = fuelType == "Elektrisch"
     val energyUnit get() = if (electric) "kWh" else "L"
@@ -328,7 +331,7 @@ private fun readVehicleProfiles(prefs: android.content.SharedPreferences): List<
         (0 until array.length()).map { i -> array.getJSONObject(i).let { o ->
             VehicleProfile(o.optString("id"), o.optString("name"), o.optString("fuelType", "E10"),
                 o.optDouble("consumption", 11.0).toFloat(), o.optDouble("price", 2.092).toFloat(),
-                o.optDouble("depreciationPerKm", 0.15).toFloat(), o.optBoolean("depreciationEnabled", false))
+                o.optDouble("depreciationPerKm", 0.15).toFloat(), o.optBoolean("depreciationEnabled", false), o.optString("licensePlate"))
         } }.ifEmpty { defaultVehicleProfiles(prefs) }
     } else defaultVehicleProfiles(prefs)
 } catch (_: Exception) { defaultVehicleProfiles(prefs) }
@@ -344,8 +347,47 @@ private fun writeVehicleProfiles(prefs: android.content.SharedPreferences, profi
     val array = JSONArray()
     profiles.forEach { p -> array.put(JSONObject().put("id", p.id).put("name", p.name).put("fuelType", p.fuelType)
         .put("consumption", p.consumption).put("price", p.price).put("depreciationPerKm", p.depreciationPerKm)
-        .put("depreciationEnabled", p.depreciationEnabled)) }
+        .put("depreciationEnabled", p.depreciationEnabled).put("licensePlate", p.licensePlate)) }
     prefs.edit().putString(KEY_VEHICLES, array.toString()).apply()
+}
+
+private data class RdwVehicleData(val makeModel: String, val apkDate: String, val consumption: Float?, val electric: Boolean)
+
+private fun lookupRdwVehicle(licensePlate: String): RdwVehicleData {
+    val plate = licensePlate.uppercase(Locale.ROOT).filter { it.isLetterOrDigit() }
+    require(plate.length in 5..8) { "Controleer het kenteken en probeer opnieuw." }
+    fun fetch(dataset: String): JSONObject? {
+        val url = URL("https://opendata.rdw.nl/resource/$dataset.json?kenteken=${URLEncoder.encode(plate, "UTF-8")}&\$limit=1")
+        val connection = (url.openConnection() as HttpURLConnection).apply {
+            connectTimeout = 12000; readTimeout = 12000; requestMethod = "GET"
+            setRequestProperty("User-Agent", "VLOTRIT/1.23 (RDW voertuiggegevens)")
+            setRequestProperty("Accept", "application/json")
+        }
+        return try {
+            val result = connection.inputStream.bufferedReader().use { it.readText() }
+            JSONArray(result).optJSONObject(0)
+        } finally { connection.disconnect() }
+    }
+    val general = fetch("m9d7-ebf2")
+    val inspection = fetch("m4ep-j23h")
+    val fuel = fetch("8ys7-d773")
+    val energy = (fuel?.optString("brandstof_omschrijving").orEmpty()).contains("elektr", true)
+    fun number(vararg keys: String): Float? = keys.firstNotNullOfOrNull { key ->
+        fuel?.optString(key)?.replace(',', '.')?.toFloatOrNull()?.takeIf { it > 0f }
+    }
+    val consumption = if (energy) {
+        number("elektrisch_verbruik_enkel_elektrisch_wltp")?.times(0.1f)
+    } else {
+        number("brandstof_verbruik_gecombineerd_wltp", "brandstofverbruik_gecombineerd")
+    }
+    val rawDate = inspection?.optString("vervaldatum_apk_dt")?.takeIf { it.isNotBlank() && it != "null" }
+        ?: inspection?.optString("vervaldatum_apk")?.takeIf { it.isNotBlank() && it != "null" }.orEmpty()
+    val digits = rawDate.take(10).filter(Char::isDigit)
+    val apk = if (digits.length >= 8) "${digits.take(4)}-${digits.substring(4, 6)}-${digits.substring(6, 8)}" else ""
+    val title = listOf(general?.optString("merk").orEmpty(), general?.optString("handelsbenaming").orEmpty())
+        .filter { it.isNotBlank() && it != "null" }.distinct().joinToString(" ")
+    if (general == null && inspection == null && fuel == null) error("Geen voertuig gevonden bij de RDW. Controleer het kenteken.")
+    return RdwVehicleData(title, apk, consumption, energy)
 }
 
 class MainActivity : ComponentActivity() {
@@ -385,6 +427,7 @@ private fun RitbonApp() {
     var priceInfo by remember { mutableStateOf("E10 prijs ophalen…") }
     var info by remember { mutableStateOf("") }
     val coroutineScope = rememberCoroutineScope()
+    val drawerState = rememberDrawerState(DrawerValue.Closed)
 
     fun selectVehicle(profile: VehicleProfile) {
         selectedVehicleId = profile.id
@@ -464,9 +507,29 @@ private fun RitbonApp() {
     }
 
     MaterialTheme(colorScheme = lightColorScheme(primary = Forest, secondary = Color(0xFF39A9D6), background = Paper, surface = Color.White, onSurface = Ink)) {
+      ModalNavigationDrawer(drawerState = drawerState, drawerContent = {
+          ModalDrawerSheet {
+              Text("VLOTRIT", modifier = Modifier.padding(horizontal = 22.dp, vertical = 22.dp), color = Ink, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
+              HorizontalDivider()
+              listOf("Brandstof", "Elektrisch", "Ritten", "Planner", "Zakelijk", "Inzicht", "Laadbeurten", "Stations", "Info", "Onderhoud").forEachIndexed { index, label ->
+                  NavigationDrawerItem(label = { Text(label) }, selected = selectedTab == index, onClick = {
+                      when (index) {
+                          0 -> if (running || workdayActive) { if (!prefs.getBoolean(KEY_TRIP_ELECTRIC, false)) selectedTab = 0 } else profiles.firstOrNull { !it.electric }?.let(::selectVehicle)
+                          1 -> if (running || workdayActive) { if (prefs.getBoolean(KEY_TRIP_ELECTRIC, false)) selectedTab = 1 } else profiles.firstOrNull { it.electric }?.let(::selectVehicle)
+                          else -> selectedTab = index
+                      }
+                      coroutineScope.launch { drawerState.close() }
+                  }, modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding))
+              }
+          }
+      }) {
         Column(Modifier.fillMaxSize().background(Paper).verticalScroll(rememberScrollState()).padding(horizontal = 18.dp, vertical = 20.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(11.dp)) {
+                    Canvas(Modifier.size(38.dp).clickable { coroutineScope.launch { drawerState.open() } }) {
+                        val stroke = 2.dp.toPx(); val left = size.width * .18f; val right = size.width * .82f
+                        listOf(.28f, .5f, .72f).forEach { y -> drawLine(Forest, androidx.compose.ui.geometry.Offset(left, size.height * y), androidx.compose.ui.geometry.Offset(right, size.height * y), strokeWidth = stroke, cap = StrokeCap.Round) }
+                    }
                     Image(painter = painterResource(R.drawable.vlotrit_logo), contentDescription = "VLOTRIT-logo", modifier = Modifier.size(46.dp), contentScale = ContentScale.Crop)
                     Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
                         Text("VLOTRIT", fontSize = 19.sp, fontWeight = FontWeight.ExtraBold, color = Ink, letterSpacing = 1.1.sp)
@@ -488,6 +551,20 @@ private fun RitbonApp() {
                     profiles = (profiles.filterNot { it.id == profile.id } + profile)
                     writeVehicleProfiles(prefs, profiles)
                     selectVehicle(profile)
+                    if (profile.licensePlate.isNotBlank()) coroutineScope.launch {
+                        try {
+                            val rdw = withContext(Dispatchers.IO) { lookupRdwVehicle(profile.licensePlate) }
+                            val updated = profile.copy(
+                                name = if (profile.name == "Mijn auto" && rdw.makeModel.isNotBlank()) rdw.makeModel else profile.name,
+                                fuelType = if (rdw.electric) "Elektrisch" else profile.fuelType,
+                                consumption = rdw.consumption ?: profile.consumption
+                            )
+                            profiles = profiles.map { if (it.id == updated.id) updated else it }
+                            writeVehicleProfiles(prefs, profiles)
+                            if (selectedVehicleId == updated.id) selectVehicle(updated)
+                            info = if (rdw.consumption != null) "RDW-verbruik voor ${profile.licensePlate} ingevuld (${rdw.consumption.formatNl()} ${if (rdw.electric) "kWh/100 km" else "L/100 km"}; testwaarde)." else "Kenteken bij de RDW gevonden; voor dit voertuig was geen verbruikswaarde beschikbaar."
+                        } catch (e: Exception) { info = e.message ?: "RDW-gegevens konden niet worden opgehaald." }
+                    }
                 },
                 onDelete = { profile ->
                     profiles = profiles.filterNot { it.id == profile.id }
@@ -500,18 +577,6 @@ private fun RitbonApp() {
                     }
                 })
             HeroBanner(selectedTab)
-            ScrollableTabRow(selectedTabIndex = selectedTab, containerColor = Color.White, contentColor = Forest, edgePadding = 8.dp) {
-                Tab(selected = selectedTab == 0, onClick = { if (!workdayActive) { if (running) { if (!prefs.getBoolean(KEY_TRIP_ELECTRIC, false)) selectedTab = 0 } else profiles.firstOrNull { !it.electric }?.let(::selectVehicle) } }, text = { Text("Brandstof") })
-                Tab(selected = selectedTab == 1, onClick = { if (!workdayActive) { if (running) { if (prefs.getBoolean(KEY_TRIP_ELECTRIC, false)) selectedTab = 1 } else profiles.firstOrNull { it.electric }?.let(::selectVehicle) } }, text = { Text("Elektrisch") })
-                Tab(selected = selectedTab == 2, onClick = { selectedTab = 2 }, text = { Text("Ritten (${history.size})") })
-                Tab(selected = selectedTab == 3, onClick = { selectedTab = 3 }, text = { Text("Planner") })
-                Tab(selected = selectedTab == 4, onClick = { selectedTab = 4 }, text = { Text("Zakelijk") })
-                Tab(selected = selectedTab == 5, onClick = { selectedTab = 5 }, text = { Text("Inzicht") })
-                Tab(selected = selectedTab == 6, onClick = { selectedTab = 6 }, text = { Text("Laadbeurten") })
-                Tab(selected = selectedTab == 7, onClick = { selectedTab = 7 }, text = { Text("Stations") })
-                Tab(selected = selectedTab == 8, onClick = { selectedTab = 8 }, text = { Text("Info") })
-                Tab(selected = selectedTab == 9, onClick = { selectedTab = 9 }, text = { Text("Onderhoud") })
-            }
             if (selectedTab == 2) {
                 TripHistory(context, prefs, history, selectedHistoryId, selectedVehicle,
                     onSelect = { selectedHistoryId = it }, onTripsChanged = { history = it },
@@ -565,7 +630,26 @@ private fun RitbonApp() {
             } else if (selectedTab == 8) {
                 AppInfoTab(context)
             } else if (selectedTab == 9) {
-                MaintenanceTab(prefs, prefs.getFloat(KEY_LAST_ODO, prefs.getFloat(KEY_END_ODO, 0f)))
+                MaintenanceTab(prefs, prefs.getFloat(KEY_LAST_ODO, prefs.getFloat(KEY_END_ODO, 0f)), profiles, selectedVehicle.id,
+                    onVehicleSelect = { profile ->
+                        selectedVehicleId = profile.id
+                        prefs.edit().putString(KEY_SELECTED_VEHICLE, profile.id).apply()
+                        if (profile.electric) { electricConsumption = profile.consumption.formatInput(); electricPrice = profile.price.formatPrice() }
+                        else { consumption = profile.consumption.formatInput(); price = profile.price.formatPrice() }
+                    },
+                    onProfileUpdated = { profile ->
+                        profiles = profiles.map { if (it.id == profile.id) profile else it }
+                        writeVehicleProfiles(prefs, profiles)
+                        if (selectedVehicleId == profile.id) {
+                            if (profile.electric) {
+                                electricConsumption = profile.consumption.formatInput(); electricPrice = profile.price.formatPrice()
+                                prefs.edit().putFloat(KEY_ELECTRIC_CONSUMPTION, profile.consumption).putFloat(KEY_ELECTRIC_PRICE, profile.price).apply()
+                            } else {
+                                consumption = profile.consumption.formatInput(); price = profile.price.formatPrice()
+                                prefs.edit().putFloat(KEY_CONSUMPTION, profile.consumption).putFloat(KEY_PRICE, profile.price).apply()
+                            }
+                        }
+                    })
             } else {
             val electricTab = selectedTab == 1
             val activeElectric = prefs.getBoolean(KEY_TRIP_ELECTRIC, false)
@@ -703,6 +787,7 @@ private fun RitbonApp() {
             }
             }
         }
+      }
     }
 }
 
@@ -789,11 +874,11 @@ private fun VehicleProfilesCard(
             Text("Voertuigprofiel", color = Ink, fontWeight = FontWeight.Bold, fontSize = 14.sp)
             Box {
                 OutlinedButton(onClick = { menuOpen = true }, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
-                    Text("${active.name}  ·  ${active.fuelType}  ▾", color = Forest)
+                    Text("${active.name}  ·  ${active.fuelType}${if (active.licensePlate.isNotBlank()) " · ${active.licensePlate}" else ""}  ▾", color = Forest)
                 }
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                     profiles.forEach { profile -> DropdownMenuItem(
-                        text = { Text("${profile.name} · ${profile.fuelType}") },
+                        text = { Text("${profile.name} · ${profile.fuelType}${if (profile.licensePlate.isNotBlank()) " · ${profile.licensePlate}" else ""}") },
                         onClick = { menuOpen = false; onSelect(profile) }, enabled = enabled
                     ) }
                 }
@@ -825,6 +910,7 @@ private fun VehicleProfileEditorDialog(initial: VehicleProfile?, onDismiss: () -
     var consumption by remember(initial?.id) { mutableStateOf((initial?.consumption ?: 11f).formatInput()) }
     var price by remember(initial?.id) { mutableStateOf((initial?.price ?: 2.092f).formatPrice()) }
     var depreciation by remember(initial?.id) { mutableStateOf((initial?.depreciationPerKm ?: 0.15f).formatPrice()) }
+    var licensePlate by remember(initial?.id) { mutableStateOf(initial?.licensePlate.orEmpty()) }
     var includeDepreciation by remember(initial?.id) { mutableStateOf(initial?.depreciationEnabled ?: false) }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -832,6 +918,7 @@ private fun VehicleProfileEditorDialog(initial: VehicleProfile?, onDismiss: () -
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(name, { name = it }, label = { Text("Naam voertuig") }, singleLine = true)
+                OutlinedTextField(licensePlate, { licensePlate = it.uppercase(Locale.ROOT) }, label = { Text("Kenteken (NL)") }, supportingText = { Text("Bij opslaan vult VLOTRIT bekende RDW-verbruiksgegevens automatisch in.") }, singleLine = true)
                 Text("Brandstofsoort", color = Muted, fontSize = 12.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     listOf("E10", "E5/98", "Elektrisch").forEach { type ->
@@ -852,7 +939,7 @@ private fun VehicleProfileEditorDialog(initial: VehicleProfile?, onDismiss: () -
             val parsedPrice = price.replace(',', '.').toFloatOrNull()
             if (name.isNotBlank() && parsed != null && parsed > 0 && parsedPrice != null && parsedPrice >= 0) onSave(VehicleProfile(
                 initial?.id ?: "vehicle-${System.currentTimeMillis()}", name.trim(), fuelType, parsed, parsedPrice,
-                depreciation.replace(',', '.').toFloatOrNull() ?: 0.15f, includeDepreciation
+                depreciation.replace(',', '.').toFloatOrNull() ?: 0.15f, includeDepreciation, licensePlate.trim().uppercase(Locale.ROOT)
             ))
         }) { Text("Opslaan") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Annuleren") } }
@@ -1290,8 +1377,12 @@ private fun ChargeSessionsTab(prefs: android.content.SharedPreferences, vehicle:
 
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
-private fun MaintenanceTab(prefs: android.content.SharedPreferences, currentOdometer: Float) {
+private fun MaintenanceTab(
+    prefs: android.content.SharedPreferences, currentOdometer: Float, profiles: List<VehicleProfile>, selectedId: String,
+    onVehicleSelect: (VehicleProfile) -> Unit, onProfileUpdated: (VehicleProfile) -> Unit
+) {
     val context = LocalContext.current
+    val vehicle = profiles.firstOrNull { it.id == selectedId } ?: profiles.first()
     val reminders = remember { mutableStateListOf<JSONObject>().apply {
         try { val array = JSONArray(prefs.getString(KEY_MAINTENANCE_REMINDERS, "[]")); for (i in 0 until array.length()) add(array.getJSONObject(i)) } catch (_: Exception) { }
     } }
@@ -1299,11 +1390,51 @@ private fun MaintenanceTab(prefs: android.content.SharedPreferences, currentOdom
     var dueDate by remember { mutableStateOf("") }
     var dueOdo by remember { mutableStateOf("") }
     var note by remember { mutableStateOf("") }
+    var lookupStatus by remember { mutableStateOf("") }
     fun persist() = prefs.edit().putString(KEY_MAINTENANCE_REMINDERS, JSONArray(reminders).toString()).apply()
+
+    LaunchedEffect(vehicle.id, vehicle.licensePlate) {
+        if (vehicle.licensePlate.isNotBlank()) {
+            lookupStatus = "RDW-gegevens voor ${vehicle.licensePlate} ophalen…"
+            try {
+                val rdw = withContext(Dispatchers.IO) { lookupRdwVehicle(vehicle.licensePlate) }
+                if (rdw.apkDate.isNotBlank()) {
+                    val updatedReminder = JSONObject().put("id", "apk-${vehicle.id}").put("kind", "APK")
+                        .put("date", rdw.apkDate).put("odometer", 0).put("note", "Automatisch opgehaald bij de RDW")
+                        .put("vehicleId", vehicle.id).put("vehicleName", vehicle.name).put("licensePlate", vehicle.licensePlate)
+                    val existing = reminders.indexOfFirst { it.optString("kind") == "APK" && it.optString("vehicleId") == vehicle.id }
+                    if (existing >= 0) reminders[existing] = updatedReminder else reminders.add(updatedReminder)
+                    persist()
+                }
+                rdw.consumption?.let { value -> if (value > 0f && (abs(vehicle.consumption - value) > 0.01f || (rdw.electric && !vehicle.electric))) {
+                    onProfileUpdated(vehicle.copy(fuelType = if (rdw.electric) "Elektrisch" else vehicle.fuelType,
+                        price = if (rdw.electric && !vehicle.electric) 0.30f else vehicle.price, consumption = value))
+                } }
+                lookupStatus = when {
+                    rdw.apkDate.isNotBlank() && rdw.consumption != null -> "RDW: APK ${rdw.apkDate} · testverbruik ${rdw.consumption.formatNl()} ${if (rdw.electric) "kWh/100 km" else "L/100 km"}."
+                    rdw.apkDate.isNotBlank() -> "RDW: APK verloopt op ${rdw.apkDate}. Geen testverbruik voor dit kenteken gevonden."
+                    else -> "Geen actuele APK-vervaldatum beschikbaar bij de RDW. Controleer het kenteken of voeg de datum handmatig toe."
+                }
+            } catch (e: Exception) { lookupStatus = e.message ?: "RDW-gegevens niet bereikbaar. Je kunt de APK-datum handmatig invullen." }
+        } else lookupStatus = "Vul bij dit voertuig eerst het kenteken in om de APK via RDW op te zoeken."
+    }
     Card(shape = RoundedCornerShape(21.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
         Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("Voertuig herinneringen", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Ink)
             Text("Plan APK, onderhoud en bandenwissels op datum of kilometerstand.", color = Muted, fontSize = 13.sp)
+            var vehicleMenuOpen by remember { mutableStateOf(false) }
+            Box {
+                OutlinedButton(onClick = { vehicleMenuOpen = true }, modifier = Modifier.fillMaxWidth()) {
+                    Text("Voertuig: ${vehicle.name} · ${vehicle.licensePlate.ifBlank { "geen kenteken" }} ▾")
+                }
+                DropdownMenu(expanded = vehicleMenuOpen, onDismissRequest = { vehicleMenuOpen = false }) {
+                    profiles.forEach { profile -> DropdownMenuItem(
+                        text = { Text("${profile.name} · ${profile.licensePlate.ifBlank { profile.fuelType }}") },
+                        onClick = { vehicleMenuOpen = false; onVehicleSelect(profile) })
+                    }
+                }
+            }
+            Text(lookupStatus, color = if (lookupStatus.startsWith("Geen") || lookupStatus.startsWith("Vul")) Muted else Forest, fontSize = 11.sp)
             var expanded by remember { mutableStateOf(false) }
             ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
                 OutlinedTextField(kind, {}, readOnly = true, label = { Text("Type herinnering") }, modifier = Modifier.fillMaxWidth().menuAnchor())
@@ -1320,7 +1451,8 @@ private fun MaintenanceTab(prefs: android.content.SharedPreferences, currentOdom
             Button(onClick = {
                 val odo = dueOdo.replace(',', '.').toFloatOrNull() ?: 0f
                 if (dueDate.isNotBlank() || odo > 0f) {
-                    reminders.add(JSONObject().put("id", System.currentTimeMillis()).put("kind", kind).put("date", dueDate).put("odometer", odo).put("note", note.trim()))
+                    reminders.add(JSONObject().put("id", System.currentTimeMillis()).put("kind", kind).put("date", dueDate).put("odometer", odo).put("note", note.trim())
+                        .put("vehicleId", vehicle.id).put("vehicleName", vehicle.name).put("licensePlate", vehicle.licensePlate))
                     persist(); dueDate = ""; dueOdo = ""; note = ""
                 }
             }, enabled = dueDate.isNotBlank() || (dueOdo.replace(',', '.').toFloatOrNull() ?: 0f) > 0f, modifier = Modifier.fillMaxWidth()) { Text("Herinnering opslaan") }
@@ -1336,6 +1468,7 @@ private fun MaintenanceTab(prefs: android.content.SharedPreferences, currentOdom
                     Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                             Text(reminder.optString("kind"), fontWeight = FontWeight.Bold, color = Ink)
+                            Text("${reminder.optString("vehicleName", "Voertuig")} · ${reminder.optString("licensePlate")}", color = Muted, fontSize = 11.sp)
                             Text(listOfNotNull(date.takeIf { it.isNotBlank() }, (if (odo > 0f) "${odo.formatNl()} km" else null)).joinToString(" · "), color = Muted, fontSize = 12.sp)
                             if (reminder.optString("note").isNotBlank()) Text(reminder.optString("note"), color = Muted, fontSize = 12.sp)
                             if (overdueDate || overdueOdo) Text("Aandacht nodig", color = Color(0xFFAA4328), fontWeight = FontWeight.Bold, fontSize = 11.sp)
