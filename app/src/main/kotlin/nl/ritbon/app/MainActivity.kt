@@ -29,9 +29,10 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.text.Html
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -56,6 +57,8 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalViewConfiguration
+import androidx.compose.ui.platform.ViewConfiguration
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -68,7 +71,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.delay
 import java.net.HttpURLConnection
 import java.net.URL
@@ -1133,6 +1135,7 @@ private fun VehicleManagerTab(
 }
 
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 private fun VehicleProfilesCard(
     profiles: List<VehicleProfile>, selectedId: String, enabled: Boolean, onSelect: (VehicleProfile) -> Unit,
     onPlateEasterEgg: () -> Unit, onHornEasterEgg: () -> Unit
@@ -1142,6 +1145,12 @@ private fun VehicleProfilesCard(
     var headlightTaps by remember { mutableIntStateOf(0) }
     var lastHeadlightTap by remember { mutableLongStateOf(0L) }
     val scope = rememberCoroutineScope()
+    val systemViewConfiguration = LocalViewConfiguration.current
+    val plateLongPressConfiguration = remember(systemViewConfiguration) {
+        object : ViewConfiguration by systemViewConfiguration {
+            override val longPressTimeoutMillis: Long = 3000L
+        }
+    }
     val active = profiles.firstOrNull { it.id == selectedId } ?: profiles.first()
     Card(shape = RoundedCornerShape(23.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(2.dp)) {
         Box {
@@ -1150,7 +1159,7 @@ private fun VehicleProfilesCard(
                     VehicleSilhouette(Modifier.fillMaxSize(), headlightFlash)
                     Box(Modifier.fillMaxSize().pointerInput(headlightFlash) {
                         detectTapGestures { tap ->
-                            val atHeadlight = tap.x > size.width * .84f && tap.y in (size.height * .43f)..(size.height * .70f)
+                            val atHeadlight = tap.x > size.width * .70f && tap.y in (size.height * .34f)..(size.height * .82f)
                             if (atHeadlight) {
                                 val now = System.currentTimeMillis()
                                 headlightTaps = if (now - lastHeadlightTap < 1400L) headlightTaps + 1 else 1
@@ -1169,24 +1178,12 @@ private fun VehicleProfilesCard(
                     Text(active.name, color = Ink, fontSize = 17.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 20.sp)
                     Text("${active.consumption.formatNl()} ${if (active.electric) "kWh/100 km" else "L/100 km"}", color = Muted, fontSize = 11.sp)
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Surface(color = BlueTint, shape = RoundedCornerShape(7.dp), modifier = Modifier.pointerInput(active.licensePlate) {
-                            if (active.licensePlate.isNotBlank()) awaitEachGesture {
-                                val down = awaitFirstDown(requireUnconsumed = false)
-                                val completed = withTimeoutOrNull<Boolean>(3000L) {
-                                    while (true) {
-                                        val event = awaitPointerEvent()
-                                        val change = event.changes.firstOrNull { it.id == down.id } ?: continue
-                                        if (!change.pressed) return@withTimeoutOrNull false
-                                        val dx = change.position.x - down.position.x
-                                        val dy = change.position.y - down.position.y
-                                        if (dx * dx + dy * dy > viewConfiguration.touchSlop * viewConfiguration.touchSlop) return@withTimeoutOrNull false
-                                    }
-                                    false
-                                }
-                                if (completed == null) onPlateEasterEgg()
+                        CompositionLocalProvider(LocalViewConfiguration provides plateLongPressConfiguration) {
+                            Surface(color = BlueTint, shape = RoundedCornerShape(7.dp), modifier = Modifier.combinedClickable(
+                                onClick = { menuOpen = true }, onLongClick = onPlateEasterEgg
+                            )) {
+                                Text(active.licensePlate.ifBlank { "Kenteken toevoegen" }, modifier = Modifier.padding(horizontal = 7.dp, vertical = 5.dp), color = Ink, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                             }
-                        }) {
-                            Text(active.licensePlate.ifBlank { "Kenteken toevoegen" }, modifier = Modifier.padding(horizontal = 7.dp, vertical = 5.dp), color = Ink, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                         }
                         Surface(color = if (active.electric) Color(0xFFE5F4FB) else Color(0xFFE2F7E8), shape = RoundedCornerShape(7.dp)) {
                             Text(fuelTypeLabel(active.fuelType), modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp), color = if (active.electric) Color(0xFF1674A7) else Color(0xFF168044), fontSize = 11.sp, fontWeight = FontWeight.ExtraBold)
@@ -1231,7 +1228,7 @@ private fun VehicleSilhouette(modifier: Modifier = Modifier, headlightFlash: Boo
             close()
         }
         drawPath(windows, BlueTint)
-        drawCircle(if (headlightFlash) Color(0xFFFFF176) else Color(0xFFB8DFFF), size.height * .055f, androidx.compose.ui.geometry.Offset(size.width * .95f, size.height * .59f))
+        drawCircle(if (headlightFlash) Color(0xFFFFF176) else Color(0xFFB8DFFF), size.height * if (headlightFlash) .12f else .08f, androidx.compose.ui.geometry.Offset(size.width * .94f, size.height * .60f))
         listOf(.28f, .76f).forEach { x ->
             drawCircle(Ink, size.height * .19f, androidx.compose.ui.geometry.Offset(size.width * x, size.height * .76f))
             drawCircle(Color(0xFFEAF0F7), size.height * .09f, androidx.compose.ui.geometry.Offset(size.width * x, size.height * .76f))
