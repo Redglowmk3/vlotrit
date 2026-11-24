@@ -75,6 +75,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.core.app.NotificationCompat
+import androidx.work.WorkManager
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -632,7 +633,10 @@ private fun RitbonApp() {
         if (prefs.getString(KEY_VEHICLES, null) == null) writeVehicleProfiles(prefs, profiles)
         prefs.edit().putString(KEY_SELECTED_VEHICLE, selectedVehicleId).apply()
     }
-    LaunchedEffect(Unit) { checkForAppUpdate() }
+    LaunchedEffect(Unit) {
+        scheduleUpdateNotificationChecks(context)
+        checkForAppUpdate()
+    }
 
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
         val ok = grants[Manifest.permission.ACCESS_FINE_LOCATION] == true || grants[Manifest.permission.ACCESS_COARSE_LOCATION] == true
@@ -1438,7 +1442,7 @@ private fun BusinessWorkdayCard(
     }
 }
 
-private data class AppRelease(val versionName: String, val apkUrl: String, val notes: String)
+internal data class AppRelease(val versionName: String, val apkUrl: String, val notes: String)
 
 @Composable
 private fun UpdateCard(context: Context, prefs: android.content.SharedPreferences, latestRelease: AppRelease?, availableRelease: AppRelease?, checking: Boolean, onCheck: () -> Unit) {
@@ -1494,7 +1498,7 @@ private fun UpdateCard(context: Context, prefs: android.content.SharedPreference
     }
 }
 
-private fun fetchLatestRelease(repository: String, sinceVersion: String? = null): AppRelease {
+internal fun fetchLatestRelease(repository: String, sinceVersion: String? = null): AppRelease {
     require(Regex("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$").matches(repository)) { "Updatekanaal is ongeldig." }
     val connection = (URL("https://api.github.com/repos/$repository/releases/latest").openConnection() as HttpURLConnection).apply {
         connectTimeout = 12000; readTimeout = 12000
@@ -1542,7 +1546,7 @@ private fun fetchReleaseChanges(repository: String, version: String, sinceVersio
     } catch (_: Exception) { null } finally { connection.disconnect() }
 }
 
-private fun compareVersionNames(left: String, right: String): Int {
+internal fun compareVersionNames(left: String, right: String): Int {
     val a = Regex("\\d+").findAll(left).map { it.value.toInt() }.toList()
     val b = Regex("\\d+").findAll(right).map { it.value.toInt() }.toList()
     for (index in 0 until maxOf(a.size, b.size)) {
@@ -1618,7 +1622,7 @@ class UpdateInstallReceiver : BroadcastReceiver() {
 private const val UPDATE_NOTIFICATION_CHANNEL = "vlotrit_update_alerts"
 private const val UPDATE_NOTIFICATION_ID = 22
 
-private fun postUpdateAvailableNotification(context: Context, prefs: android.content.SharedPreferences, release: AppRelease) {
+internal fun postUpdateAvailableNotification(context: Context, prefs: android.content.SharedPreferences, release: AppRelease) {
     if (!prefs.getBoolean("setting_update_notifications", false)) return
     if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
     if (prefs.getString("update_notification_version", "") == release.versionName) return
@@ -3081,26 +3085,14 @@ private fun RouteMap(route: String, modifier: Modifier = Modifier) {
             }
         }
     }
-    val routeJson = remember(points) { JSONArray().apply { points.forEach { put(JSONArray().put(it.first).put(it.second)) } }.toString() }
-    val script = remember(routeJson) {
-        """window.initVlotritMap=function(){try{
-           const pts=$routeJson,map=new maplibregl.Map({container:'map',style:'https://tiles.openfreemap.org/styles/liberty',center:[5.2913,52.1326],zoom:7,attributionControl:true});
-           let mapHadError=false,readySent=false;map.scrollZoom.disable();map.dragPan.disable();map.doubleClickZoom.disable();map.touchZoomRotate.disable();map.keyboard.disable();map.boxZoom.disable();map.on('error',()=>{mapHadError=true;document.getElementById('map-error').style.display='block';if(window.VlotritBridge)window.VlotritBridge.failed()});
-           map.on('load',()=>{document.getElementById('map-error').style.display='none';if(pts.length){const coords=pts.map(p=>[p[1],p[0]]);map.addSource('route',{type:'geojson',data:{type:'Feature',properties:{},geometry:{type:'LineString',coordinates:coords}}});map.addLayer({id:'route-casing',type:'line',source:'route',layout:{'line-cap':'round','line-join':'round'},paint:{'line-color':'#ffffff','line-width':9}});map.addLayer({id:'route-line',type:'line',source:'route',layout:{'line-cap':'round','line-join':'round'},paint:{'line-color':'#176b4b','line-width':5}});new maplibregl.Marker({color:'#176b4b'}).setLngLat(coords[0]).setPopup(new maplibregl.Popup().setText('Start')).addTo(map);if(coords.length>1)new maplibregl.Marker({color:'#e4774d'}).setLngLat(coords[coords.length-1]).setPopup(new maplibregl.Popup().setText('Einde')).addTo(map);if(coords.length>1){const bounds=coords.reduce((b,p)=>b.extend(p),new maplibregl.LngLatBounds(coords[0],coords[0]));map.fitBounds(bounds,{padding:30,maxZoom:15})}}});map.on('idle',()=>{if(mapHadError)return;if(!map.isStyleLoaded()||!map.areTilesLoaded())return;const baseLayers=map.getStyle().layers.filter(l=>l.source&&l.source!=='route').map(l=>l.id);const baseFeatures=baseLayers.length?map.queryRenderedFeatures({layers:baseLayers}):[];if(baseFeatures.length>0){if(!readySent){readySent=true;if(window.VlotritBridge)window.VlotritBridge.ready()}}else{mapHadError=true;if(window.VlotritBridge)window.VlotritBridge.failed()}});setTimeout(()=>map.resize(),350);setTimeout(()=>{if(!map.isStyleLoaded()){mapHadError=true;document.getElementById('map-error').style.display='block';if(window.VlotritBridge)window.VlotritBridge.failed()}},15000);
-           }catch(e){document.getElementById('map-error').style.display='block'}};"""
-    }
-    var mapReady by remember(routeJson) { mutableStateOf(false) }
     Box(modifier.clip(RoundedCornerShape(12.dp))) {
         RouteFallbackMap(points, Modifier.fillMaxSize())
-        MapWebView(script, Modifier.fillMaxSize().alpha(if (mapReady) 1f else 0f), onMapReady = { mapReady = true }, onMapFailed = { mapReady = false })
-        if (!mapReady) {
-            Surface(Modifier.align(Alignment.TopStart).padding(8.dp), color = Color.White.copy(alpha = .92f), shape = RoundedCornerShape(20.dp)) {
-                Text("GPS-route · ${points.size} punten", Modifier.padding(horizontal = 10.dp, vertical = 6.dp), color = Color(0xFF176B4B), fontSize = 10.sp, fontWeight = FontWeight.Bold)
-            }
-            Row(Modifier.align(Alignment.BottomCenter).padding(8.dp), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                Surface(color = Color.White.copy(alpha = .94f), shape = RoundedCornerShape(20.dp)) { Text("START", Modifier.padding(horizontal = 9.dp, vertical = 5.dp), color = Color(0xFF176B4B), fontSize = 9.sp, fontWeight = FontWeight.Bold) }
-                Surface(color = Color.White.copy(alpha = .94f), shape = RoundedCornerShape(20.dp)) { Text("EINDE", Modifier.padding(horizontal = 9.dp, vertical = 5.dp), color = Color(0xFFD66F48), fontSize = 9.sp, fontWeight = FontWeight.Bold) }
-            }
+        Surface(Modifier.align(Alignment.TopStart).padding(8.dp), color = Color.White.copy(alpha = .92f), shape = RoundedCornerShape(20.dp)) {
+            Text("GPS-route · ${points.size} punten", Modifier.padding(horizontal = 10.dp, vertical = 6.dp), color = Color(0xFF176B4B), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+        }
+        Row(Modifier.align(Alignment.BottomCenter).padding(8.dp), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+            Surface(color = Color.White.copy(alpha = .94f), shape = RoundedCornerShape(20.dp)) { Text("START", Modifier.padding(horizontal = 9.dp, vertical = 5.dp), color = Color(0xFF176B4B), fontSize = 9.sp, fontWeight = FontWeight.Bold) }
+            Surface(color = Color.White.copy(alpha = .94f), shape = RoundedCornerShape(20.dp)) { Text("EINDE", Modifier.padding(horizontal = 9.dp, vertical = 5.dp), color = Color(0xFFD66F48), fontSize = 9.sp, fontWeight = FontWeight.Bold) }
         }
     }
 }
