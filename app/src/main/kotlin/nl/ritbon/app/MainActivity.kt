@@ -123,6 +123,9 @@ private val BlueTint = Color(0xFFE7F1FB)
 private const val UPDATE_REPOSITORY = "redglowmk3/vlotrit"
 private const val UPDATE_INSTALL_STATUS_ACTION = "nl.ritbon.app.UPDATE_INSTALL_STATUS"
 
+private fun isElectricFuelType(type: String) = type.equals("EV", true) || type.equals("Elektrisch", true)
+private fun fuelTypeLabel(type: String) = if (isElectricFuelType(type)) "EV" else type
+
 internal data class VehicleProfile(
     val id: String,
     val name: String,
@@ -133,7 +136,7 @@ internal data class VehicleProfile(
     val depreciationEnabled: Boolean,
     val licensePlate: String = ""
 ) {
-    val electric get() = fuelType == "Elektrisch"
+    val electric get() = isElectricFuelType(fuelType)
     val energyUnit get() = if (electric) "kWh" else "L"
 }
 
@@ -235,7 +238,7 @@ private fun readHistory(prefs: android.content.SharedPreferences): List<TripReco
             o.optDouble("distanceKm").toFloat(), o.optDouble("consumption", 11.0).toFloat(), o.optDouble("price", 2.092).toFloat(),
             o.optLong("priceUpdatedAt"), o.optLong("startedAt"), o.optLong("stoppedAt"), o.optString("route"), o.optBoolean("electric", false),
             o.optString("startLocation"), o.optString("endLocation"), o.optBoolean("depreciationEnabled", false), o.optDouble("depreciationPerKm", 0.15).toFloat(),
-            o.optString("vehicleId"), o.optString("vehicleName"), o.optString("fuelType", if (o.optBoolean("electric", false)) "Elektrisch" else "E10"),
+            o.optString("vehicleId"), o.optString("vehicleName"), fuelTypeLabel(o.optString("fuelType", if (o.optBoolean("electric", false)) "EV" else "E10")),
             if (o.isNull("actualEnergy")) null else o.optDouble("actualEnergy").toFloat(),
             o.optString("category", "Privé"), (o.optJSONArray("passengers") ?: JSONArray()).let { names -> (0 until names.length()).map { names.optString(it) }.filter { it.isNotBlank() } })
     }
@@ -286,7 +289,7 @@ internal fun saveAutomaticBusinessTrip(prefs: android.content.SharedPreferences)
     val route = prefs.getString(KEY_ROUTE, "").orEmpty()
     val endpoints = routeEndpoints(route)
     val electric = prefs.getBoolean(KEY_TRIP_ELECTRIC, false)
-    val fuelType = prefs.getString(KEY_ACTIVE_FUEL_TYPE, if (electric) "Elektrisch" else "E10").orEmpty()
+    val fuelType = fuelTypeLabel(prefs.getString(KEY_ACTIVE_FUEL_TYPE, if (electric) "EV" else "E10").orEmpty())
     val record = TripRecord(
         stoppedAt, name, startKm, endKm, km,
         prefs.getFloat(KEY_ACTIVE_CONSUMPTION, if (electric) 18f else 11f),
@@ -329,7 +332,7 @@ private fun readVehicleProfiles(prefs: android.content.SharedPreferences): List<
     if (saved != null) {
         val array = JSONArray(saved)
         (0 until array.length()).map { i -> array.getJSONObject(i).let { o ->
-            VehicleProfile(o.optString("id"), o.optString("name"), o.optString("fuelType", "E10"),
+            VehicleProfile(o.optString("id"), o.optString("name"), fuelTypeLabel(o.optString("fuelType", "E10")),
                 o.optDouble("consumption", 11.0).toFloat(), o.optDouble("price", 2.092).toFloat(),
                 o.optDouble("depreciationPerKm", 0.15).toFloat(), o.optBoolean("depreciationEnabled", false), o.optString("licensePlate"))
         } }.ifEmpty { defaultVehicleProfiles(prefs) }
@@ -339,7 +342,7 @@ private fun readVehicleProfiles(prefs: android.content.SharedPreferences): List<
 private fun defaultVehicleProfiles(prefs: android.content.SharedPreferences) = listOf(
     VehicleProfile("default-fuel", "Mijn auto", "E10", prefs.getFloat(KEY_CONSUMPTION, 11f), prefs.getFloat(KEY_PRICE, 2.092f),
         prefs.getFloat(KEY_DEPRECIATION_RATE, 0.15f), prefs.getBoolean(KEY_FUEL_DEPRECIATION, false)),
-    VehicleProfile("default-electric", "Mijn elektrische auto", "Elektrisch", prefs.getFloat(KEY_ELECTRIC_CONSUMPTION, 18f),
+    VehicleProfile("default-electric", "Mijn elektrische auto", "EV", prefs.getFloat(KEY_ELECTRIC_CONSUMPTION, 18f),
         prefs.getFloat(KEY_ELECTRIC_PRICE, 0.30f), prefs.getFloat(KEY_DEPRECIATION_RATE, 0.15f), prefs.getBoolean(KEY_ELECTRIC_DEPRECIATION, false))
 )
 
@@ -461,7 +464,7 @@ private fun RitbonApp() {
                 val rdw = withContext(Dispatchers.IO) { lookupRdwVehicle(profile.licensePlate) }
                 val updated = profile.copy(
                     name = if (profile.name == "Mijn auto" && rdw.makeModel.isNotBlank()) rdw.makeModel else profile.name,
-                    fuelType = if (rdw.electric) "Elektrisch" else profile.fuelType,
+                    fuelType = if (rdw.electric) "EV" else profile.fuelType,
                     price = if (rdw.electric && !profile.electric) 0.30f else profile.price,
                     consumption = rdw.consumption ?: profile.consumption
                 )
@@ -549,7 +552,7 @@ private fun RitbonApp() {
             val km = (distance.toFloatOrNull() ?: 0f).coerceAtLeast(0f)
             val start = startOdo.toFloatOrNull() ?: prefs.getFloat(KEY_LAST_ODO, 0f)
             val tripIsElectric = prefs.getBoolean(KEY_TRIP_ELECTRIC, false)
-            val tripFuelType = prefs.getString(KEY_ACTIVE_FUEL_TYPE, if (tripIsElectric) "Elektrisch" else "E10").orEmpty()
+            val tripFuelType = fuelTypeLabel(prefs.getString(KEY_ACTIVE_FUEL_TYPE, if (tripIsElectric) "EV" else "E10").orEmpty())
             val tripConsumption = prefs.getFloat(KEY_ACTIVE_CONSUMPTION, prefs.getFloat(if (tripIsElectric) KEY_ELECTRIC_CONSUMPTION else KEY_CONSUMPTION, if (tripIsElectric) 18f else 11f))
             val tripPrice = prefs.getFloat(KEY_ACTIVE_PRICE, prefs.getFloat(if (tripIsElectric) KEY_ELECTRIC_PRICE else KEY_PRICE, if (tripIsElectric) 0.30f else 2.092f))
             endOdo = start + km
@@ -586,7 +589,7 @@ private fun RitbonApp() {
           ModalDrawerSheet {
               Text("VLOTRIT", modifier = Modifier.padding(horizontal = 22.dp, vertical = 22.dp), color = Ink, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
               HorizontalDivider()
-              listOf("Brandstof", "Elektrisch", "Ritten", "Planner", "Zakelijk", "Inzicht", "Laadbeurten", "Stations", "Onderhoud", "Voertuigen", "Info").forEachIndexed { index, label ->
+              listOf("Brandstof", "EV", "Ritten", "Planner", "Zakelijk", "Inzicht", "Laadbeurten", "Stations", "Onderhoud", "Voertuigen", "Info").forEachIndexed { index, label ->
                   if (index == 10) HorizontalDivider(Modifier.padding(vertical = 8.dp))
                   NavigationDrawerItem(label = { Text(label) }, selected = selectedTab == index, onClick = {
                       when (index) {
@@ -715,15 +718,15 @@ private fun RitbonApp() {
             } else if (running && activeElectric != electricTab) {
                 Card(shape = RoundedCornerShape(21.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
                     Column(Modifier.padding(19.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text(if (activeElectric) "Je elektrische rit loopt" else "Je brandstofrit loopt", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = Ink)
-                        Text("Stop deze rit op het tabblad ${if (activeElectric) "Elektrisch" else "Brandstof"}.", color = Muted, fontSize = 13.sp)
+                        Text(if (activeElectric) "Je EV-rit loopt" else "Je brandstofrit loopt", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = Ink)
+                        Text("Stop deze rit op het tabblad ${if (activeElectric) "EV" else "Brandstof"}.", color = Muted, fontSize = 13.sp)
                         Button(onClick = { selectedTab = if (activeElectric) 1 else 0 }) { Text("Ga naar actieve rit") }
                     }
                 }
             } else {
             Card(shape = RoundedCornerShape(21.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
                 Column(Modifier.padding(19.dp), verticalArrangement = Arrangement.spacedBy(13.dp)) {
-                    Text(if (electricTab) "Elektrische rit" else "Brandstofrit", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = Ink)
+                    Text(if (electricTab) "EV-rit" else "Brandstofrit", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = Ink)
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         NumericField("Beginstand", startOdo, { startOdo = it }, "km", Modifier.weight(1f), enabled = !running)
                         NumericField("Eindstand", if (running) "—" else if (endOdo > 0f) endOdo.formatInput() else "—", {}, "km", Modifier.weight(1f), enabled = false)
@@ -739,7 +742,7 @@ private fun RitbonApp() {
                                 }
                             },
                             if (electricTab) "kWh/100 km" else "L/100 km", Modifier.weight(1f), enabled = !running)
-                        NumericField(if (electricTab) "Stroomprijs" else "${selectedVehicle.fuelType} prijs", displayedPrice,
+                        NumericField(if (electricTab) "Stroomprijs" else "${fuelTypeLabel(selectedVehicle.fuelType)} prijs", displayedPrice,
                             { value ->
                                 if (electricTab) electricPrice = value else price = value
                                 value.replace(',', '.').toFloatOrNull()?.takeIf { it >= 0f }?.let { number ->
@@ -749,7 +752,7 @@ private fun RitbonApp() {
                             },
                             if (electricTab) "€/kWh" else "€/L", Modifier.weight(1f), enabled = !running)
                     }
-                    Text(if (electricTab) "Vul de prijs per kWh van je laadpas of laadpunt in." else if (selectedVehicle.fuelType == "E10") priceInfo else "Pas de ${selectedVehicle.fuelType}-prijs aan op je huidige pompprijs.", color = Muted, fontSize = 11.sp)
+                    Text(if (electricTab) "Vul de prijs per kWh van je laadpas of laadpunt in." else if (selectedVehicle.fuelType == "E10") priceInfo else "Pas de ${fuelTypeLabel(selectedVehicle.fuelType)}-prijs aan op je huidige pompprijs.", color = Muted, fontSize = 11.sp)
                     val useDepreciation = selectedVehicle.depreciationEnabled
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(checked = useDepreciation, onCheckedChange = { checked ->
@@ -799,12 +802,12 @@ private fun HeroBanner(selectedTab: Int, running: Boolean, gpsError: String, wor
         return
     }
     val section = when (selectedTab) {
-        1 -> "ELEKTRISCH RIJDEN"
+        1 -> "EV RIJDEN"
         2 -> "JOUW RITTEN"
         3 -> "ROUTE PLANNER"
         4 -> "ZAKELIJK RIJDEN"
         5 -> "RITSTATISTIEKEN"
-        6 -> "ELEKTRISCH LADEN"
+        6 -> "EV LADEN"
         7 -> "TANKEN & LADEN"
         8 -> "ONDERHOUD & HERINNERINGEN"
         9 -> "JOUW VOERTUIGEN"
@@ -943,7 +946,7 @@ private fun VehicleManagerTab(
                             Text(profile.name, color = Ink, fontWeight = FontWeight.Bold, fontSize = 15.sp)
                             if (profile.id == selectedId) Text("Actief", color = Forest, fontWeight = FontWeight.Bold, fontSize = 11.sp)
                         }
-                        Text("${profile.licensePlate.ifBlank { "Geen kenteken" }} · ${profile.fuelType}", color = Muted, fontSize = 12.sp)
+                        Text("${profile.licensePlate.ifBlank { "Geen kenteken" }} · ${fuelTypeLabel(profile.fuelType)}", color = Muted, fontSize = 12.sp)
                         Text("${profile.consumption.formatNl()} ${if (profile.electric) "kWh/100 km" else "L/100 km"} · ${profile.depreciationPerKm.euro()}/km afschrijving", color = Muted, fontSize = 11.sp)
                         Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                             OutlinedButton(onClick = { onSelect(profile) }, enabled = enabled && profile.id != selectedId) { Text("Kiezen") }
@@ -984,7 +987,7 @@ private fun VehicleProfilesCard(
                             Text(active.licensePlate.ifBlank { "Kenteken toevoegen" }, modifier = Modifier.padding(horizontal = 7.dp, vertical = 5.dp), color = Ink, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                         }
                         Surface(color = if (active.electric) Color(0xFFE5F4FB) else Color(0xFFE2F7E8), shape = RoundedCornerShape(7.dp)) {
-                            Text(active.fuelType, modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp), color = if (active.electric) Color(0xFF1674A7) else Color(0xFF168044), fontSize = 11.sp, fontWeight = FontWeight.ExtraBold)
+                            Text(fuelTypeLabel(active.fuelType), modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp), color = if (active.electric) Color(0xFF1674A7) else Color(0xFF168044), fontSize = 11.sp, fontWeight = FontWeight.ExtraBold)
                         }
                     }
                 }
@@ -992,7 +995,7 @@ private fun VehicleProfilesCard(
             }
             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                 profiles.forEach { profile -> DropdownMenuItem(
-                    text = { Column { Text(profile.name, fontWeight = FontWeight.SemiBold); Text("${profile.licensePlate.ifBlank { profile.fuelType }} · ${profile.consumption.formatNl()} ${if (profile.electric) "kWh/100 km" else "L/100 km"}", color = Muted, fontSize = 11.sp) } },
+                    text = { Column { Text(profile.name, fontWeight = FontWeight.SemiBold); Text("${profile.licensePlate.ifBlank { fuelTypeLabel(profile.fuelType) }} · ${profile.consumption.formatNl()} ${if (profile.electric) "kWh/100 km" else "L/100 km"}", color = Muted, fontSize = 11.sp) } },
                     onClick = { menuOpen = false; onSelect(profile) }, enabled = enabled
                 ) }
             }
@@ -1037,7 +1040,7 @@ private fun VehicleSilhouette(modifier: Modifier = Modifier) {
 @Composable
 private fun VehicleProfileEditorDialog(initial: VehicleProfile?, onDismiss: () -> Unit, onSave: (VehicleProfile) -> Unit) {
     var name by remember(initial?.id) { mutableStateOf(initial?.name.orEmpty()) }
-    var fuelType by remember(initial?.id) { mutableStateOf(initial?.fuelType ?: "E10") }
+    var fuelType by remember(initial?.id) { mutableStateOf(fuelTypeLabel(initial?.fuelType ?: "E10")) }
     var consumption by remember(initial?.id) { mutableStateOf((initial?.consumption ?: 11f).formatInput()) }
     var price by remember(initial?.id) { mutableStateOf((initial?.price ?: 2.092f).formatPrice()) }
     var depreciation by remember(initial?.id) { mutableStateOf((initial?.depreciationPerKm ?: 0.15f).formatPrice()) }
@@ -1052,12 +1055,12 @@ private fun VehicleProfileEditorDialog(initial: VehicleProfile?, onDismiss: () -
                 OutlinedTextField(licensePlate, { licensePlate = it.uppercase(Locale.ROOT) }, label = { Text("Kenteken (NL)") }, supportingText = { Text("Bij opslaan vult VLOTRIT bekende RDW-verbruiksgegevens automatisch in.") }, singleLine = true)
                 Text("Brandstofsoort", color = Muted, fontSize = 12.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    listOf("E10", "E5/98", "Elektrisch").forEach { type ->
+                    listOf("E10", "E5/98", "EV").forEach { type ->
                         FilterChip(selected = fuelType == type, onClick = { fuelType = type }, label = { Text(type) })
                     }
                 }
-                NumericField("Standaardverbruik", consumption, { consumption = it }, if (fuelType == "Elektrisch") "kWh/100 km" else "L/100 km", Modifier.fillMaxWidth(), true)
-                NumericField("Prijs", price, { price = it }, if (fuelType == "Elektrisch") "€/kWh" else "€/L", Modifier.fillMaxWidth(), true)
+                NumericField("Standaardverbruik", consumption, { consumption = it }, if (fuelType == "EV") "kWh/100 km" else "L/100 km", Modifier.fillMaxWidth(), true)
+                NumericField("Prijs", price, { price = it }, if (fuelType == "EV") "€/kWh" else "€/L", Modifier.fillMaxWidth(), true)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(includeDepreciation, { includeDepreciation = it })
                     Text("Afschrijving rekenen", color = Ink, fontSize = 13.sp)
@@ -1293,11 +1296,12 @@ private fun startTrip(context: Context, prefs: android.content.SharedPreferences
 
 @Composable
 private fun ReceiptCard(context: Context, prefs: android.content.SharedPreferences, route: String, endOdo: Float, km: Float, consumption: Float, price: Float, priceUpdatedAt: Long, tripName: String, electric: Boolean, startLocation: String, endLocation: String, depreciationEnabled: Boolean, depreciationPerKm: Float, vehicleId: String, vehicleName: String, fuelType: String, actualEnergy: Float?) {
+    val visibleFuelType = fuelTypeLabel(fuelType)
     val estimatedEnergy = km * consumption / 100f
     val energy = actualEnergy ?: estimatedEnergy
     val energyUnit = if (electric) "kWh" else "L"
     val consumptionUnit = if (electric) "kWh/100 km" else "L/100 km"
-    val priceLabel = if (electric) "Stroomprijs" else "$fuelType prijs"
+    val priceLabel = if (electric) "Stroomprijs" else "$visibleFuelType prijs"
     val depreciationCost = if (depreciationEnabled) km * depreciationPerKm else 0f
     val total = energy * price + depreciationCost
     val start = prefs.getFloat(KEY_START_ODO, endOdo - km)
@@ -1305,7 +1309,7 @@ private fun ReceiptCard(context: Context, prefs: android.content.SharedPreferenc
     val stopped = prefs.getLong(KEY_STOPPED_AT, System.currentTimeMillis())
     val receiptLines = mutableListOf(
         "VLOTRIT Bon${if (tripName.isNotBlank()) " · $tripName" else ""}",
-        "Voertuig: $vehicleName ($fuelType)",
+        "Voertuig: $vehicleName ($visibleFuelType)",
         "${km.formatNl()} km gereden",
         "Gemiddeld verbruik: ${estimatedEnergy.formatNl()} $energyUnit (${consumption.formatNl()} $consumptionUnit)",
         "$priceLabel: ${price.euro()} per $energyUnit"
@@ -1324,7 +1328,7 @@ private fun ReceiptCard(context: Context, prefs: android.content.SharedPreferenc
         route, electric, startLocation, endLocation, depreciationEnabled, depreciationPerKm, vehicleId, vehicleName, fuelType, actualEnergy)
     Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Color(0xFF14395F)), elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)) {
         Column(Modifier.padding(19.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("VLOTRIT Bon · $vehicleName ($fuelType)", color = Color(0xFFB6CBBF), fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+            Text("VLOTRIT Bon · $vehicleName ($visibleFuelType)", color = Color(0xFFB6CBBF), fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
             HorizontalDivider(color = Color.White.copy(alpha = .2f))
             ReceiptLine("Afstand", "${km.formatNl()} km")
             actualEnergy?.let { ReceiptLine("Gemeten verbruik", "${it.formatNl()} $energyUnit totaal") }
@@ -1538,7 +1542,7 @@ private fun MaintenanceTab(
                     persist()
                 }
                 rdw.consumption?.let { value -> if (value > 0f && (abs(vehicle.consumption - value) > 0.01f || (rdw.electric && !vehicle.electric))) {
-                    onProfileUpdated(vehicle.copy(fuelType = if (rdw.electric) "Elektrisch" else vehicle.fuelType,
+                    onProfileUpdated(vehicle.copy(fuelType = if (rdw.electric) "EV" else vehicle.fuelType,
                         price = if (rdw.electric && !vehicle.electric) 0.30f else vehicle.price, consumption = value))
                 } }
                 lookupStatus = when {
@@ -1560,7 +1564,7 @@ private fun MaintenanceTab(
                 }
                 DropdownMenu(expanded = vehicleMenuOpen, onDismissRequest = { vehicleMenuOpen = false }) {
                     profiles.forEach { profile -> DropdownMenuItem(
-                        text = { Text("${profile.name} · ${profile.licensePlate.ifBlank { profile.fuelType }}") },
+                        text = { Text("${profile.name} · ${profile.licensePlate.ifBlank { fuelTypeLabel(profile.fuelType) }}") },
                         onClick = { vehicleMenuOpen = false; onVehicleSelect(profile) })
                     }
                 }
@@ -2080,7 +2084,7 @@ private fun RoutePlanner(context: Context, prefs: android.content.SharedPreferen
             }
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 FilterChip(selected = !electric, onClick = { electric = false; result = null }, label = { Text(if (vehicle.electric) "E10" else vehicle.fuelType) })
-                FilterChip(selected = electric, onClick = { electric = true; result = null }, label = { Text("Elektrisch") })
+                FilterChip(selected = electric, onClick = { electric = true; result = null }, label = { Text("EV") })
             }
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 NumericField(if (electric) "Stroomverbruik" else "Benzineverbruik", if (electric) electricConsumption else fuelConsumption,
@@ -2194,7 +2198,7 @@ private fun TripHistory(context: Context, prefs: android.content.SharedPreferenc
     var yearFilter by remember { mutableStateOf(SimpleDateFormat("yyyy", Locale.US).format(Date())) }
     var searchQuery by remember { mutableStateOf("") }
     val filteredTrips = trips.filter { trip ->
-        val typeOk = typeFilter == "Alle" || (typeFilter == "Elektrisch") == trip.electric
+        val typeOk = typeFilter == "Alle" || (typeFilter == "EV") == trip.electric
         val date = SimpleDateFormat("yyyy-MM", Locale.US).format(Date(trip.stoppedAt))
         val monthOk = monthFilter.isBlank() || date == monthFilter.trim()
         val yearOk = yearFilter.isBlank() || date.startsWith(yearFilter.trim())
@@ -2203,7 +2207,7 @@ private fun TripHistory(context: Context, prefs: android.content.SharedPreferenc
     }
     val totalKm = filteredTrips.sumOf { it.distanceKm.toDouble() }.toFloat()
     val totalCost = filteredTrips.sumOf { it.cost.toDouble() }.toFloat()
-    val measuredTrips = trips.filter { it.vehicleId == activeProfile.id && it.fuelType == activeProfile.fuelType && it.actualEnergy != null && it.distanceKm > 0f }
+    val measuredTrips = trips.filter { it.vehicleId == activeProfile.id && fuelTypeLabel(it.fuelType) == fuelTypeLabel(activeProfile.fuelType) && it.actualEnergy != null && it.distanceKm > 0f }
     val measuredAverage = measuredTrips.takeIf { it.size >= 3 }?.let { group ->
         group.sumOf { it.actualEnergy!!.toDouble() } * 100.0 / group.sumOf { it.distanceKm.toDouble() }
     }?.toFloat()
@@ -2219,7 +2223,7 @@ private fun TripHistory(context: Context, prefs: android.content.SharedPreferenc
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                listOf("Alle", "Brandstof", "Elektrisch").forEach { option ->
+                listOf("Alle", "Brandstof", "EV").forEach { option ->
                     FilterChip(selected = typeFilter == option, onClick = { typeFilter = option }, label = { Text(option) })
                 }
             }
@@ -2259,7 +2263,7 @@ private fun TripHistory(context: Context, prefs: android.content.SharedPreferenc
                 Column {
                     Row(Modifier.fillMaxWidth().clickable { onSelect(trip.id) }.padding(vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                            Text("${trip.category} · ${trip.fuelType.ifBlank { if (trip.electric) "Elektrisch" else "E10" }} · ${trip.name.ifBlank { trip.vehicleName.ifBlank { "Rit" } }}", color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                            Text("${trip.category} · ${fuelTypeLabel(trip.fuelType.ifBlank { if (trip.electric) "EV" else "E10" })} · ${trip.name.ifBlank { trip.vehicleName.ifBlank { "Rit" } }}", color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
                             Text("${Date(trip.stoppedAt).clock()}  ·  ${trip.distanceKm.formatNl()} km", color = Muted, fontSize = 11.sp)
                         }
                         Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(3.dp)) {
@@ -2299,7 +2303,7 @@ private fun TripHistory(context: Context, prefs: android.content.SharedPreferenc
                             if (trip.endLocation.isNotBlank()) HistoryDetailLine("Aankomst", trip.endLocation)
                             if (trip.depreciationEnabled) HistoryDetailLine("Afschrijving (${trip.depreciationPerKm.euro()}/km)", trip.depreciationCost.euro())
                             HistoryDetailLine(if (trip.electric) "Gemiddeld stroomverbruik" else "Gemiddeld verbruik", "${trip.consumption.formatNl()} ${trip.consumptionUnit}")
-                            HistoryDetailLine(if (trip.electric) "Stroomprijs" else "${trip.fuelType.ifBlank { "E10" }} prijs", "${trip.price.euro()} ${trip.priceUnit}")
+                            HistoryDetailLine(if (trip.electric) "Stroomprijs" else "${fuelTypeLabel(trip.fuelType.ifBlank { "E10" })} prijs", "${trip.price.euro()} ${trip.priceUnit}")
                             if (!trip.electric && trip.fuelType != "E5/98") HistoryDetailLine("ANWB-prijs opgehaald", trip.priceUpdatedAt.dateTimeOrUnknown())
                             ActualEnergyEditor(trip) { measured ->
                                 val updated = trips.map { if (it.id == trip.id) it.copy(actualEnergy = measured) else it }
@@ -2364,11 +2368,11 @@ private fun shareTrip(context: Context, trip: TripRecord, body: String? = null) 
     val receiptLines = mutableListOf(
         "VLOTRIT Bon${if (trip.name.isNotBlank()) " · ${trip.name}" else ""}",
         "Categorie: ${trip.category}",
-        if (trip.vehicleName.isNotBlank()) "Voertuig: ${trip.vehicleName} (${trip.fuelType.ifBlank { if (trip.electric) "Elektrisch" else "E10" }})" else "Voertuig: ${trip.fuelType.ifBlank { if (trip.electric) "Elektrisch" else "E10" }}",
+        if (trip.vehicleName.isNotBlank()) "Voertuig: ${trip.vehicleName} (${fuelTypeLabel(trip.fuelType.ifBlank { if (trip.electric) "EV" else "E10" })})" else "Voertuig: ${fuelTypeLabel(trip.fuelType.ifBlank { if (trip.electric) "EV" else "E10" })}",
         "${trip.distanceKm.formatNl()} km gereden",
         "Gemiddeld verbruik: ${trip.estimatedEnergyAmount.formatNl()} ${trip.energyUnit} (${trip.consumption.formatNl()} ${trip.consumptionUnit})",
         "${if (trip.electric) "Stroomkosten" else "Brandstofkosten"}: ${trip.energyCost.euro()}",
-        "${if (trip.electric) "Stroomprijs" else "${trip.fuelType.ifBlank { "E10" }} prijs"}: ${trip.price.euro()} per ${trip.energyUnit}"
+        "${if (trip.electric) "Stroomprijs" else "${fuelTypeLabel(trip.fuelType.ifBlank { "E10" })} prijs"}: ${trip.price.euro()} per ${trip.energyUnit}"
     )
     trip.actualEnergy?.let { actual -> receiptLines.add("Gemeten verbruik: ${actual.formatNl()} ${trip.energyUnit} totaal (${(actual * 100f / trip.distanceKm.coerceAtLeast(0.01f)).formatNl()} ${trip.consumptionUnit})") }
     if (!trip.electric && trip.fuelType != "E5/98") receiptLines.add("ANWB-prijs opgehaald: ${trip.priceUpdatedAt.dateTimeOrUnknown()}")
@@ -2413,7 +2417,7 @@ private fun shareCsvOverview(context: Context, trips: List<TripRecord>) {
     val lines = mutableListOf("Datum;Label;Categorie;Voertuig;Type;Km;Gemeten hoeveelheid;Verbruik per 100 km;Prijs;Afschrijving;Totaal")
     trips.forEach { t ->
         val measuredRate = t.actualEnergy?.let { it * 100f / t.distanceKm.coerceAtLeast(0.01f) }?.formatNl().orEmpty()
-        lines.add(listOf(Date(t.stoppedAt).dateTime(), t.name, t.category, t.vehicleName, t.fuelType.ifBlank { if (t.electric) "Elektrisch" else "E10" },
+        lines.add(listOf(Date(t.stoppedAt).dateTime(), t.name, t.category, t.vehicleName, fuelTypeLabel(t.fuelType.ifBlank { if (t.electric) "EV" else "E10" }),
             t.distanceKm.formatNl(), t.actualEnergy?.formatNl().orEmpty(), measuredRate, t.price.euro(), t.depreciationCost.euro(), t.cost.euro()).joinToString(";") { cell(it) })
     }
     shareTextFile(context, "Vlotrit-ritten.csv", "text/csv", lines.joinToString("\n"), "VLOTRIT rittenoverzicht")
@@ -2454,12 +2458,12 @@ private fun shareTripImage(context: Context, trip: TripRecord) {
 private fun tripReceiptText(trip: TripRecord): String = buildList {
     add("VLOTRIT Bon${if (trip.name.isNotBlank()) " · ${trip.name}" else ""}")
     add("Categorie: ${trip.category}")
-    if (trip.vehicleName.isNotBlank()) add("Voertuig: ${trip.vehicleName} (${trip.fuelType})")
+    if (trip.vehicleName.isNotBlank()) add("Voertuig: ${trip.vehicleName} (${fuelTypeLabel(trip.fuelType)})")
     add("${trip.distanceKm.formatNl()} km gereden")
     add("Gemiddeld verbruik: ${trip.estimatedEnergyAmount.formatNl()} ${trip.energyUnit} (${trip.consumption.formatNl()} ${trip.consumptionUnit})")
     trip.actualEnergy?.let { add("Gemeten verbruik: ${it.formatNl()} ${trip.energyUnit} totaal (${(it * 100f / trip.distanceKm.coerceAtLeast(0.01f)).formatNl()} ${trip.consumptionUnit})") }
     add("${if (trip.electric) "Stroomkosten" else "Brandstofkosten"}: ${trip.energyCost.euro()}")
-    add("${if (trip.electric) "Stroomprijs" else "${trip.fuelType.ifBlank { "E10" }} prijs"}: ${trip.price.euro()} per ${trip.energyUnit}")
+    add("${if (trip.electric) "Stroomprijs" else "${fuelTypeLabel(trip.fuelType.ifBlank { "E10" })} prijs"}: ${trip.price.euro()} per ${trip.energyUnit}")
     if (!trip.electric && trip.fuelType != "E5/98") add("ANWB-prijs opgehaald: ${trip.priceUpdatedAt.dateTimeOrUnknown()}")
     add("Kilometerstand: ${trip.startKm.formatNl()} → ${trip.endKm.formatNl()} km")
     add("${Date(trip.startedAt).dateTime()} – ${Date(trip.stoppedAt).dateTime()}")
