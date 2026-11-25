@@ -602,7 +602,7 @@ private fun RitbonApp() {
     fun saveVehicleProfile(profile: VehicleProfile) {
         profiles = profiles.filterNot { it.id == profile.id } + profile
         writeVehicleProfiles(prefs, profiles)
-        selectVehicle(profile, navigateToTripTab = selectedTab !in 10..11)
+        selectVehicle(profile, navigateToTripTab = selectedTab !in 10..13)
         if (profile.licensePlate.isNotBlank()) coroutineScope.launch {
             try {
                 val rdw = withContext(Dispatchers.IO) { lookupRdwVehicle(profile.licensePlate) }
@@ -614,7 +614,7 @@ private fun RitbonApp() {
                 )
                 profiles = profiles.map { if (it.id == updated.id) updated else it }
                 writeVehicleProfiles(prefs, profiles)
-                if (selectedVehicleId == updated.id) selectVehicle(updated, navigateToTripTab = selectedTab !in 10..11)
+                if (selectedVehicleId == updated.id) selectVehicle(updated, navigateToTripTab = selectedTab !in 10..13)
                 info = if (rdw.consumption != null) "RDW-testverbruik voor ${profile.licensePlate} ingevuld (${rdw.consumption.formatNl()} ${if (rdw.electric) "kWh/100 km" else "L/100 km"})." else "Kenteken gevonden; RDW heeft geen verbruikswaarde voor dit voertuig."
             } catch (e: Exception) { info = e.message ?: "RDW-gegevens konden niet worden opgehaald." }
         }
@@ -625,7 +625,7 @@ private fun RitbonApp() {
         writeVehicleProfiles(prefs, profiles)
         if (selectedVehicleId == profile.id) {
             val replacement = profiles.first()
-            selectVehicle(replacement, navigateToTripTab = selectedTab !in 10..11)
+            selectVehicle(replacement, navigateToTripTab = selectedTab !in 10..13)
         }
     }
 
@@ -782,7 +782,7 @@ private fun RitbonApp() {
               Column(Modifier.verticalScroll(rememberScrollState()).padding(vertical = 8.dp)) {
                   Text("VLOTRIT", modifier = Modifier.padding(horizontal = 22.dp, vertical = 22.dp), color = Ink, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
                   HorizontalDivider()
-                  listOf("Brandstof", "EV", "Ritten", "Planner", "Zakelijk", "Inzicht", "Laadbeurten", "Stations", "Onderhoud", "Voertuigen", "Instellingen", "Info").forEachIndexed { index, label ->
+                  listOf("Brandstof", "EV", "Ritten", "Planner", "Zakelijk", "Inzicht", "Laadbeurten", "Stations", "Onderhoud", "Voertuigen", "Instellingen", "Hulp", "Contact", "Info").forEachIndexed { index, label ->
                       if (index == 11) HorizontalDivider(Modifier.padding(vertical = 8.dp))
                       NavigationDrawerItem(label = { Text(label) }, selected = selectedTab == index, onClick = {
                           when (index) {
@@ -822,7 +822,7 @@ private fun RitbonApp() {
                     }
                 }
             }
-            if (selectedTab !in 7..11) VehicleProfilesCard(profiles, selectedVehicle.id, enabled = !running && !workdayActive,
+            if (selectedTab !in 7..13) VehicleProfilesCard(profiles, selectedVehicle.id, enabled = !running && !workdayActive,
                 onSelect = { selectVehicle(it) }, onPlateEasterEgg = { logoConfettiBurst++ }, onHornEasterEgg = { if (soundEffects) playEasterEggSound(horn = true) })
             HeroBanner(selectedTab, running, gpsError, workdayActive, onTripAction)
             if (selectedTab == 0 && openingGreeting.isNotBlank()) {
@@ -834,7 +834,7 @@ private fun RitbonApp() {
                 }
             }
             if (availableRelease != null) {
-                Card(Modifier.fillMaxWidth().clickable { selectedTab = 11 }, shape = RoundedCornerShape(16.dp),
+                Card(Modifier.fillMaxWidth().clickable { selectedTab = 13 }, shape = RoundedCornerShape(16.dp),
                     colors = CardDefaults.cardColors(containerColor = BlueTint)) {
                     Text("Er is een nieuwe update beschikbaar. Werk VLOTRIT bij via het kopje Info om de nieuwe versie te gebruiken.",
                         Modifier.padding(horizontal = 15.dp, vertical = 12.dp), color = Ink, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
@@ -993,6 +993,10 @@ private fun RitbonApp() {
                         }
                     })
             } else if (selectedTab == 11) {
+                HelpTab()
+            } else if (selectedTab == 12) {
+                ContactTab(context)
+            } else if (selectedTab == 13) {
                 AppInfoTab(context, latestRelease, availableRelease, checkingUpdates) { coroutineScope.launch { checkForAppUpdate() } }
             } else {
             val electricTab = selectedTab == 1
@@ -2131,6 +2135,81 @@ private fun SettingToggle(title: String, description: String, checked: Boolean, 
 }
 
 @Composable
+private fun HelpTab() {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = CardSurface)) {
+            Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Welkom bij VLOTRIT", color = Ink, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                Text("VLOTRIT helpt je ritten, voertuigkosten en routes bij te houden. Hieronder vind je per onderdeel een korte uitleg.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
+            }
+        }
+        HelpSection("Ritten registreren", "Kies bovenaan het juiste voertuig. Open Brandstof of EV, controleer het gemiddelde verbruik en de actuele prijs en tik op Start rit. Je kunt vóór de start GPS-tracking en de ritmelding aan- of uitzetten. Bij GPS-tracking vraagt Android om locatie- en meldingsrechten. Stop de rit om de afstand en kosten op te slaan en de bon te bekijken of te delen.")
+        HelpSection("Ritten en bonnen", "In Ritten vind je je opgeslagen ritten. Zoek op omschrijving, filter op type of datum en bekijk totalen. Selecteer één of meer ritten om ze te verwijderen. Je kunt een rit privé of zakelijk indelen, gegevens bekijken en ritten of overzichten delen/exporteren.")
+        HelpSection("Planner", "Vul een vertrekpunt en bestemming in. Voeg zo nodig tussenpunten toe of kies retour. De planner toont de geschatte routeafstand en kosten. Je kunt brandstof of EV, verbruik, energieprijs en afschrijving aanpassen. De routeweergave is een offline getekende schets op basis van de routepunten; die bevat geen straatnamen.")
+        HelpSection("Zakelijke werkdag", "Start een werkdag om ritten automatisch te laten registreren wanneer VLOTRIT beweging detecteert. Laat de ritmelding actief zodat Android de locatievolging op de achtergrond kan uitvoeren. Stop de werkdag om de automatische registratie te beëindigen; de ritten staan daarna in Ritten.")
+        HelpSection("Voertuigen en onderhoud", "Beheer voertuigen, kentekens, brandstofsoort, gemiddeld verbruik, prijzen en afschrijving in Voertuigen. Gebruik de voertuigkeuze bovenaan de andere onderdelen. In Onderhoud kun je per voertuig APK-, onderhouds- en bandenherinneringen beheren.")
+        HelpSection("Inzicht, laden en stations", "Inzicht vat je ritten en gemiddelde verbruik samen. Laadbeurten bewaart je laadgeschiedenis. Stations toont tankstations en laadpunten in de buurt; beschikbaarheid en prijsinformatie kunnen per locatie verschillen.")
+        HelpSection("Instellingen en updates", "Pas in Instellingen het thema en meldingsvoorkeuren aan. De optionele updatewaarschuwing kan ook op de achtergrond controleren; Android kan dat vanwege batterijbeheer uitstellen. Kijk op Info voor de huidige versie en om een update te installeren.")
+        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = BlueTint)) {
+            Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Er valt meer te ontdekken", color = Ink, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                Text("VLOTRIT heeft ook een paar verborgen verrassingen. Kijk goed rond en probeer eens iets uit…", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun HelpSection(title: String, description: String) {
+    Card(shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = CardSurface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)) {
+        Column(Modifier.fillMaxWidth().padding(17.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+            Text(title, color = Ink, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+            Text(description, color = Muted, fontSize = 12.sp, lineHeight = 18.sp)
+        }
+    }
+}
+
+@Composable
+private fun ContactTab(context: Context) {
+    var subject by remember { mutableStateOf("") }
+    var message by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf("") }
+    Column(verticalArrangement = Arrangement.spacedBy(13.dp)) {
+        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = CardSurface)) {
+            Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(11.dp)) {
+                Text("Vraag of feedback?", color = Ink, fontWeight = FontWeight.Bold, fontSize = 19.sp)
+                Text("Vul hieronder je onderwerp en bericht in. Je e-mailapp opent met de gegevens alvast ingevuld; je kunt het bericht daar nog aanpassen en zelf verzenden.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
+                OutlinedTextField(value = subject, onValueChange = { subject = it; error = "" }, modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Onderwerp") }, singleLine = true)
+                OutlinedTextField(value = message, onValueChange = { message = it; error = "" }, modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Je vraag of feedback") }, minLines = 5, maxLines = 9)
+                if (error.isNotBlank()) Text(error, color = Color(0xFFB3261E), fontSize = 12.sp)
+                Button(onClick = {
+                    if (message.isBlank()) {
+                        error = "Vul eerst je vraag of feedback in."
+                    } else {
+                        val emailIntent = Intent(Intent.ACTION_SENDTO).apply {
+                            data = Uri.parse("mailto:Redglowmk3@gmail.com")
+                            putExtra(Intent.EXTRA_SUBJECT, subject.ifBlank { "VLOTRIT vraag of feedback" })
+                            putExtra(Intent.EXTRA_TEXT, message)
+                        }
+                        runCatching { context.startActivity(Intent.createChooser(emailIntent, "E-mail versturen")) }
+                            .onFailure { error = "Er is geen e-mailapp ingesteld op dit apparaat." }
+                    }
+                }, modifier = Modifier.fillMaxWidth()) {
+                    Text("Open e-mailapp")
+                }
+                Text("Je bericht wordt pas verstuurd nadat je dit bevestigt in je e-mailapp.", color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
+            }
+        }
+        Card(shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = BlueTint)) {
+            Text("Liever rechtstreeks mailen? Redglowmk3@gmail.com", Modifier.padding(16.dp), color = Ink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+        }
+    }
+}
+
+@Composable
 private fun AppInfoTab(context: Context, latestRelease: AppRelease?, availableRelease: AppRelease?, checkingUpdates: Boolean, onCheckUpdates: () -> Unit) {
     val packageInfo = remember {
         runCatching { context.packageManager.getPackageInfo(context.packageName, 0) }.getOrNull()
@@ -2162,7 +2241,7 @@ private fun AppInfoTab(context: Context, latestRelease: AppRelease?, availableRe
                 HistoryDetailLine("Versie", versionName)
                 HistoryDetailLine("Buildnummer", versionCode)
                 HistoryDetailLine("App-id", context.packageName)
-                Text("Nieuwe updates vind je bovenaan dit Info-tabblad.", color = Muted, fontSize = 12.sp, lineHeight = 17.sp)
+                Text("Updates vind je bovenaan dit Info-tabblad.", color = Muted, fontSize = 12.sp, lineHeight = 17.sp)
                 TextButton(onClick = { openExternal(context, "https://github.com/Redglowmk3/vlotrit/releases/latest") }) {
                     Text("Bekijk releases op GitHub ↗", color = Forest, fontWeight = FontWeight.Bold)
                 }
