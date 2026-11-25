@@ -155,6 +155,7 @@ private var Paper by mutableStateOf(Color(0xFFF3F7FC))
 private var BlueTint by mutableStateOf(Color(0xFFE7F1FB))
 private var CardSurface by mutableStateOf(Color.White)
 private const val UPDATE_REPOSITORY = "redglowmk3/vlotrit"
+private const val PRIVACY_POLICY_URL = "https://github.com/redglowmk3/vlotrit/blob/main/PRIVACY.md"
 private const val UPDATE_INSTALL_STATUS_ACTION = "nl.ritbon.app.UPDATE_INSTALL_STATUS"
 
 private fun isElectricFuelType(type: String) = type.equals("EV", true) || type.equals("Elektrisch", true)
@@ -2244,6 +2245,9 @@ private fun AppInfoTab(context: Context, latestRelease: AppRelease?, availableRe
                 Text("Updates vind je bovenaan dit Info-tabblad.", color = Muted, fontSize = 12.sp, lineHeight = 17.sp)
                 TextButton(onClick = { openExternal(context, "https://github.com/Redglowmk3/vlotrit/releases/latest") }) {
                     Text("Bekijk releases op GitHub ↗", color = Forest, fontWeight = FontWeight.Bold)
+                }
+                TextButton(onClick = { openExternal(context, PRIVACY_POLICY_URL) }) {
+                    Text("Privacybeleid", color = Forest, fontWeight = FontWeight.Bold)
                 }
             }
         }
