@@ -6,14 +6,14 @@ plugins {
 
 android {
     namespace = "nl.ritbon.app"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "nl.ritbon.app"
         minSdk = 26
-        targetSdk = 35
-        versionCode = 43
-        versionName = "1.42"
+        targetSdk = 36
+        versionCode = 44
+        versionName = "1.43"
     }
 
     flavorDimensions += "distribution"
