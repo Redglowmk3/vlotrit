@@ -16,6 +16,18 @@ android {
         versionName = "1.42"
     }
 
+    flavorDimensions += "distribution"
+    productFlavors {
+        create("github") {
+            dimension = "distribution"
+            applicationId = "nl.ritbon.app"
+        }
+        create("play") {
+            dimension = "distribution"
+            applicationId = "com.vlotrit"
+        }
+    }
+
     buildFeatures { compose = true }
     val updateKeystorePath = System.getenv("VLOTRIT_KEYSTORE_PATH")
     val updateKeystorePassword = System.getenv("VLOTRIT_KEYSTORE_PASSWORD") ?: "android"

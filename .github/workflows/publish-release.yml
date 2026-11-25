@@ -72,8 +72,8 @@ jobs:
       - name: Build signed APK
         if: steps.version.outputs.exists != 'true'
         run: |
-          gradle --no-daemon :app:assembleRelease -x lintVitalRelease
-          cp app/build/outputs/apk/release/app-release.apk Vlotrit.apk
+          gradle --no-daemon :app:assembleGithubRelease -x lintVitalGithubRelease
+          cp app/build/outputs/apk/github/release/app-github-release.apk Vlotrit.apk
 
       - name: Publish GitHub release
         if: steps.version.outputs.exists != 'true'
