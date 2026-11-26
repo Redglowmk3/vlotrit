@@ -40,9 +40,6 @@ Als je stations in de buurt zoekt, stuurt VLOTRIT je huidige locatiecoördinaten
 
 Deze diensten ontvangen de gegevens die nodig zijn voor de aangevraagde functie. Hun servers kunnen daarnaast gebruikelijke technische gegevens verwerken, zoals IP-adres, tijdstip en technische aanvraaginformatie. De diensten worden door derden beheerd en vallen onder hun eigen privacy- en bewaarbeleid.
 
-### Updates
-
-Als je VLOTRIT op updates laat controleren, vraagt de app GitHub om informatie over de openbare VLOTRIT-release. Bij het controleren van wijzigingsnotities kan ook een vergelijking tussen versienummers worden opgevraagd. Als je een update downloadt, wordt de APK van GitHub gedownload. GitHub kan daarbij gebruikelijke technische aanvraaggegevens verwerken. De optionele updatewaarschuwing controleert periodiek zolang die instelling aanstaat en Android de taak laat uitvoeren.
 
 ### Delen en contact
 
